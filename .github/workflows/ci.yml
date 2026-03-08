@@ -24,14 +24,16 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
+          GOPATH: /tmp/gopath
         run: |
           set -euo pipefail
-          mkdir -p /tmp/gopath/src/github.com/yadutaf
-          ln -s "$GITHUB_WORKSPACE" /tmp/gopath/src/github.com/yadutaf/docker-machine-driver-ovh
-          cd /tmp/gopath/src/github.com/yadutaf/docker-machine-driver-ovh
+          mkdir -p "$GOPATH/src/github.com/yadutaf"
+          ln -s "$GITHUB_WORKSPACE" "$GOPATH/src/github.com/yadutaf/docker-machine-driver-ovh"
+          cd "$GOPATH/src/github.com/yadutaf/docker-machine-driver-ovh"
           mkdir -p dist
           COMMIT="${GITHUB_SHA::12}"
           OUT="dist/docker-machine-driver-ovh_linux_${GOARCH}_${COMMIT}"
+          go env
           go build -trimpath -ldflags "-s -w -buildid=" -o "$OUT" .
           sha256sum "$OUT" | tee dist/SHA256SUMS-${GOARCH}
 
