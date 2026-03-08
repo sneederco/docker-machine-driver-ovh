@@ -70,6 +70,7 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco"
           ln -s "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco/docker-machine-driver-ovh"
+<<<<<<< HEAD
       - name: Rebuild amd64 twice and verify matching digest
         env:
           GOPATH: ${{ github.workspace }}/.gopath
