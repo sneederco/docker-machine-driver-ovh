@@ -37,6 +37,16 @@ type Driver struct {
 	RegionName         string
 	PrivateNetworkName string
 
+	// Hosted MKS mode parameters
+	HostedMKS              bool
+	MKSClusterName         string
+	MKSVersion             string
+	MKSNodePoolName        string
+	MKSNodePoolFlavor      string
+	MKSNodePoolDesiredSize int
+	MKSClusterID           string
+	MKSNodePoolID          string
+
 	// Ovh specific parameters
 	BillingPeriod string
 	Endpoint      string
@@ -126,6 +136,35 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage: "OVH Cloud billing period (hourly or monthly). Default: hourly",
 			Value: DefaultBillingPeriod,
 		},
+		mcnflag.BoolFlag{
+			Name:  "ovh-hosted-mks",
+			Usage: "Use OVH Managed Kubernetes Service (MKS) hosted mode instead of a single VM instance",
+		},
+		mcnflag.StringFlag{
+			Name:  "ovh-mks-cluster-name",
+			Usage: "OVH MKS cluster name (required when --ovh-hosted-mks is set)",
+			Value: "",
+		},
+		mcnflag.StringFlag{
+			Name:  "ovh-mks-version",
+			Usage: "OVH MKS kubernetes version override",
+			Value: "",
+		},
+		mcnflag.StringFlag{
+			Name:  "ovh-mks-nodepool-name",
+			Usage: "OVH MKS nodepool name",
+			Value: "default",
+		},
+		mcnflag.StringFlag{
+			Name:  "ovh-mks-nodepool-flavor",
+			Usage: "OVH MKS nodepool flavor name",
+			Value: DefaultFlavorName,
+		},
+		mcnflag.IntFlag{
+			Name:  "ovh-mks-nodepool-size",
+			Usage: "OVH MKS nodepool desired node count",
+			Value: 1,
+		},
 	}
 }
 
@@ -162,6 +201,12 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.PrivateNetworkName = flags.String("ovh-private-network")
 	d.KeyPairName = flags.String("ovh-ssh-key")
 	d.BillingPeriod = flags.String("ovh-billing-period")
+	d.HostedMKS = flags.Bool("ovh-hosted-mks")
+	d.MKSClusterName = flags.String("ovh-mks-cluster-name")
+	d.MKSVersion = flags.String("ovh-mks-version")
+	d.MKSNodePoolName = flags.String("ovh-mks-nodepool-name")
+	d.MKSNodePoolFlavor = flags.String("ovh-mks-nodepool-flavor")
+	d.MKSNodePoolDesiredSize = flags.Int("ovh-mks-nodepool-size")
 
 	// Swarm configuration, must be in each driver
 	d.SwarmMaster = flags.Bool("swarm-master")
@@ -226,11 +271,23 @@ func (d *Driver) PreCreateCheck() error {
 	if strings.TrimSpace(d.RegionName) == "" {
 		return fmt.Errorf("Missing required value for '--ovh-region'")
 	}
-	if strings.TrimSpace(d.FlavorName) == "" {
-		return fmt.Errorf("Missing required value for '--ovh-flavor'")
-	}
-	if strings.TrimSpace(d.ImageID) == "" {
-		return fmt.Errorf("Missing required value for '--ovh-image'")
+	if d.HostedMKS {
+		if strings.TrimSpace(d.MKSClusterName) == "" {
+			return fmt.Errorf("Missing required value for '--ovh-mks-cluster-name' when '--ovh-hosted-mks' is enabled")
+		}
+		if strings.TrimSpace(d.MKSNodePoolFlavor) == "" {
+			return fmt.Errorf("Missing required value for '--ovh-mks-nodepool-flavor' when '--ovh-hosted-mks' is enabled")
+		}
+		if d.MKSNodePoolDesiredSize < 1 {
+			return fmt.Errorf("Invalid value %d for '--ovh-mks-nodepool-size'. Must be >= 1", d.MKSNodePoolDesiredSize)
+		}
+	} else {
+		if strings.TrimSpace(d.FlavorName) == "" {
+			return fmt.Errorf("Missing required value for '--ovh-flavor'")
+		}
+		if strings.TrimSpace(d.ImageID) == "" {
+			return fmt.Errorf("Missing required value for '--ovh-image'")
+		}
 	}
 
 	// Validate region
@@ -243,6 +300,11 @@ func (d *Driver) PreCreateCheck() error {
 		log.Warnf("Could not fetch regions from OVH API, accepting fallback region %s", d.RegionName)
 	} else if !containsIgnoreCase(regions, d.RegionName) {
 		return fmt.Errorf("Invalid region %s. For a list of valid OVH regions, please visit %s", d.RegionName, CustomerInterface)
+	}
+
+	if d.HostedMKS {
+		log.Debug("Hosted MKS mode selected; skipping VM flavor/image/ssh network validation")
+		return nil
 	}
 
 	// Validate flavor
@@ -410,6 +472,35 @@ func (d *Driver) Create() error {
 		return err
 	}
 
+	if d.HostedMKS {
+		log.Debug("Creating OVH Managed Kubernetes (MKS) cluster...")
+		clusterReq := MKSClusterCreateReq{
+			Name:   d.MKSClusterName,
+			Region: d.RegionName,
+		}
+		if d.MKSVersion != "" {
+			clusterReq.Version = d.MKSVersion
+		}
+		cluster, err := client.CreateMKSCluster(d.ProjectID, clusterReq)
+		if err != nil {
+			return err
+		}
+		d.MKSClusterID = cluster.ID
+
+		nodePoolReq := MKSNodePoolCreateReq{
+			Name:         d.MKSNodePoolName,
+			FlavorName:   d.MKSNodePoolFlavor,
+			DesiredNodes: d.MKSNodePoolDesiredSize,
+		}
+		nodePool, err := client.CreateMKSNodePool(d.ProjectID, d.MKSClusterID, nodePoolReq)
+		if err != nil {
+			return err
+		}
+		d.MKSNodePoolID = nodePool.ID
+		log.Infof("Created OVH MKS cluster %s with nodepool %s", d.MKSClusterID, d.MKSNodePoolID)
+		return nil
+	}
+
 	// Ensure ssh key
 	err = d.ensureSSHKey()
 	if err != nil {
@@ -522,6 +613,16 @@ func (d *Driver) Remove() error {
 		return err
 	}
 
+	if d.HostedMKS {
+		if d.MKSClusterID != "" {
+			log.Debugf("deleting MKS cluster...", map[string]interface{}{"ClusterID": d.MKSClusterID})
+			if err = client.DeleteMKSCluster(d.ProjectID, d.MKSClusterID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	// Deletes instance, if we created it
 	if d.InstanceID != "" {
 		err = client.DeleteInstance(d.ProjectID, d.InstanceID)
@@ -607,4 +708,25 @@ func (d *Driver) Stop() (err error) {
 
 	_, err = d.waitForInstanceStatus("SHUTOFF")
 	return err
+}
+
+// ListHostedMKSClusters is a helper for hosted MKS mode.
+func (d *Driver) ListHostedMKSClusters() (MKSClusters, error) {
+	client, err := d.getClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.ListMKSClusters(d.ProjectID)
+}
+
+// ScaleHostedMKSNodePool is a helper for hosted MKS mode.
+func (d *Driver) ScaleHostedMKSNodePool(desiredNodes int) error {
+	if d.MKSClusterID == "" || d.MKSNodePoolID == "" {
+		return fmt.Errorf("MKS cluster/nodepool IDs are required before scaling")
+	}
+	client, err := d.getClient()
+	if err != nil {
+		return err
+	}
+	return client.ScaleMKSNodePool(d.ProjectID, d.MKSClusterID, d.MKSNodePoolID, desiredNodes)
 }
