@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build legacy GOPATH project
+        env:
+          GO111MODULE: "off"
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gopath/src/github.com/yadutaf
+          ln -s "$GITHUB_WORKSPACE" /tmp/gopath/src/github.com/yadutaf/docker-machine-driver-ovh
+          cd /tmp/gopath/src/github.com/yadutaf/docker-machine-driver-ovh
+          mkdir -p dist
+          COMMIT="${GITHUB_SHA::12}"
+          OUT="dist/docker-machine-driver-ovh_linux_${GOARCH}_${COMMIT}"
+          go build -trimpath -ldflags "-s -w -buildid=" -o "$OUT" .
+          sha256sum "$OUT" | tee dist/SHA256SUMS-${GOARCH}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-machine-driver-ovh-${{ matrix.arch }}
+          path: |
+            dist/docker-machine-driver-ovh_linux_${{ matrix.arch }}_*
+            dist/SHA256SUMS-${{ matrix.arch }}
