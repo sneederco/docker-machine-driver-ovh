@@ -81,6 +81,36 @@ Note: For the different image-types you have to use special --ovh-ssh-user (for 
 |``--ovh-project``                                          |Cloud Project name/description or id|single one|only if multiple projects|
 |``--ovh-ssh-key``                                          |Cloud Machine SSH Key|none |no|
 |``--ovh-billing-period``                                   |OVH Cloud billing period (hourly or monthly)|hourly |no|
+|``--ovh-hosted-mks``                                       |Enable hosted OVH Managed Kubernetes Service (MKS) mode|false|no|
+|``--ovh-mks-cluster-name``                                 |MKS cluster name (required when hosted mode is enabled)|none|conditional|
+|``--ovh-mks-version``                                      |Kubernetes version override for MKS cluster|latest default by OVH|no|
+|``--ovh-mks-nodepool-name``                                |MKS nodepool name|default|no|
+|``--ovh-mks-nodepool-flavor``                              |MKS nodepool flavor name|vps-ssd-1|conditional|
+|``--ovh-mks-nodepool-size``                                |MKS nodepool desired node count|1|conditional|
+
+### Hosted OVH MKS mode (MVP)
+
+Experimental MVP wiring is available for OVH Managed Kubernetes Service via `--ovh-hosted-mks`.
+
+Example:
+
+```
+docker-machine create -d ovh \
+  --ovh-hosted-mks \
+  --ovh-project "$OVH_PROJECT" \
+  --ovh-region GRA1 \
+  --ovh-mks-cluster-name dm-mks-cluster \
+  --ovh-mks-nodepool-name default \
+  --ovh-mks-nodepool-flavor b2-7 \
+  --ovh-mks-nodepool-size 3 \
+  dm-ovh-mks
+```
+
+Current MVP scope:
+- create cluster
+- list clusters (helper path)
+- delete cluster
+- nodepool create + desiredNodes scale request model
 
 ### Vrack integration
 
