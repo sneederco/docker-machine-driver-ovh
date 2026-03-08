@@ -1,46 +1,82 @@
-name: ci
+name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches:
+      - master
   pull_request:
+  workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Prepare GOPATH layout for vendored legacy build
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco"
+          ln -s "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco/docker-machine-driver-ovh"
+      - name: Run tests
+        env:
+          GOPATH: ${{ github.workspace }}/.gopath
+          GO111MODULE: off
+        run: |
+          cd "$GOPATH/src/github.com/sneederco/docker-machine-driver-ovh"
+          go test ./...
+
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
-
-      - name: Build legacy GOPATH project
-        env:
-          GO111MODULE: "off"
-          CGO_ENABLED: "0"
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
-          GOPATH: /tmp/gopath
+          go-version: '1.22'
+      - name: Prepare GOPATH layout for vendored legacy build
         run: |
-          set -euo pipefail
-          mkdir -p "$GOPATH/src/github.com/yadutaf"
-          ln -s "$GITHUB_WORKSPACE" "$GOPATH/src/github.com/yadutaf/docker-machine-driver-ovh"
-          cd "$GOPATH/src/github.com/yadutaf/docker-machine-driver-ovh"
-          mkdir -p dist
-          COMMIT="${GITHUB_SHA::12}"
-          OUT="dist/docker-machine-driver-ovh_linux_${GOARCH}_${COMMIT}"
-          go env
-          go build -trimpath -ldflags "-s -w -buildid=" -o "$OUT" .
-          sha256sum "$OUT" | tee dist/SHA256SUMS-${GOARCH}
-
-      - name: Upload artifacts
+          mkdir -p "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco"
+          ln -s "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco/docker-machine-driver-ovh"
+      - name: Build linux/${{ matrix.arch }} binary + checksum
+        env:
+          GOPATH: ${{ github.workspace }}/.gopath
+        run: |
+          cd "$GOPATH/src/github.com/sneederco/docker-machine-driver-ovh"
+          ./scripts/build.sh "${{ matrix.arch }}" dist
+      - name: Upload artifact + checksum
         uses: actions/upload-artifact@v4
         with:
-          name: docker-machine-driver-ovh-${{ matrix.arch }}
+          name: docker-machine-driver-ovh-linux-${{ matrix.arch }}
           path: |
-            dist/docker-machine-driver-ovh_linux_${{ matrix.arch }}_*
-            dist/SHA256SUMS-${{ matrix.arch }}
+            dist/docker-machine-driver-ovh-linux-${{ matrix.arch }}
+            dist/docker-machine-driver-ovh-linux-${{ matrix.arch }}.sha256
+
+  reproducibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Prepare GOPATH layout for vendored legacy build
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco"
+          ln -s "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco/docker-machine-driver-ovh"
+      - name: Rebuild amd64 twice and verify matching digest
+        env:
+          GOPATH: ${{ github.workspace }}/.gopath
+        run: |
+          cd "$GOPATH/src/github.com/sneederco/docker-machine-driver-ovh"
+          ./scripts/build.sh amd64 dist
+          awk '{print $1}' dist/docker-machine-driver-ovh-linux-amd64.sha256 > /tmp/first.sha256
+          ./scripts/build.sh amd64 dist2
+          awk '{print $1}' dist2/docker-machine-driver-ovh-linux-amd64.sha256 > /tmp/second.sha256
+          diff -u /tmp/first.sha256 /tmp/second.sha256
