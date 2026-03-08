@@ -396,5 +396,19 @@ func (a *API) DeleteInstance(projectID, instanceID string) (err error) {
 func (a *API) GetInstance(projectID, instanceID string) (instance *Instance, err error) {
 	url := fmt.Sprintf("/cloud/project/%s/instance/%s", projectID, instanceID)
 	err = a.client.Get(url, &instance)
-	return instance, nil
+	return instance, err
+}
+
+// StartInstance powers on a stopped instance
+func (a *API) StartInstance(projectID, instanceID string) (err error) {
+	url := fmt.Sprintf("/cloud/project/%s/instance/%s/start", projectID, instanceID)
+	err = a.client.Post(url, nil, nil)
+	return err
+}
+
+// StopInstance powers off a running instance
+func (a *API) StopInstance(projectID, instanceID string) (err error) {
+	url := fmt.Sprintf("/cloud/project/%s/instance/%s/stop", projectID, instanceID)
+	err = a.client.Post(url, nil, nil)
+	return err
 }

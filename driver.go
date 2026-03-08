@@ -21,6 +21,12 @@ const (
 	statusTimeout = 200
 )
 
+var (
+	fallbackRegions = []string{"GRA1", "GRA3", "SBG1", "SBG5", "BHS5", "DE1", "UK1", "WAW1"}
+	fallbackFlavors = []string{"vps-ssd-1", "vps-ssd-2", "vps-ssd-3", "b2-7", "b2-15", "b2-30"}
+	fallbackImages  = []string{"Ubuntu 22.04", "Ubuntu 20.04", "Debian 12", "Debian 11"}
+)
+
 // Driver is a machine driver for OVH.
 type Driver struct {
 	*drivers.BaseDriver
@@ -87,17 +93,17 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-region",
-			Usage: "OVH Cloud region name",
+			Usage: "OVH Cloud region name. Fallback options: GRA1, GRA3, SBG1, SBG5, BHS5, DE1, UK1, WAW1",
 			Value: DefaultRegionName,
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-flavor",
-			Usage: "OVH Cloud flavor name or id. Default: vps-ssd-1",
+			Usage: "OVH Cloud flavor name or id. Fallback options: vps-ssd-1, vps-ssd-2, vps-ssd-3, b2-7, b2-15, b2-30",
 			Value: DefaultFlavorName,
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-image",
-			Usage: "OVH Cloud Image name or id. Default: Ubuntu 16.04",
+			Usage: "OVH Cloud image name or id. Fallback options: Ubuntu 22.04, Ubuntu 20.04, Debian 12, Debian 11",
 			Value: DefaultImageName,
 		},
 		mcnflag.StringFlag{
@@ -289,7 +295,8 @@ func (d *Driver) PreCreateCheck() error {
 
 	return nil
 }
-//copied from openstack driver
+
+// copied from openstack driver
 func sanitizeKeyPairName(s *string) {
 	*s = strings.Replace(*s, ".", "_", -1)
 }
@@ -531,7 +538,9 @@ func (d *Driver) Restart() error {
 	if err != nil {
 		return err
 	}
-	return nil
+
+	_, err = d.waitForInstanceStatus("ACTIVE")
+	return err
 }
 
 //
@@ -543,12 +552,36 @@ func (d *Driver) Kill() (err error) {
 	return fmt.Errorf("Killing machines is not possible on OVH Cloud")
 }
 
-// Start (STUB) start machine
+// Start starts a stopped machine
 func (d *Driver) Start() (err error) {
-	return fmt.Errorf("Starting machines is not possible on OVH Cloud")
+	log.Debugf("Starting OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
+
+	client, err := d.getClient()
+	if err != nil {
+		return err
+	}
+
+	if err = client.StartInstance(d.ProjectID, d.InstanceID); err != nil {
+		return err
+	}
+
+	_, err = d.waitForInstanceStatus("ACTIVE")
+	return err
 }
 
-// Stop (STUB) stop machine
+// Stop stops a running machine
 func (d *Driver) Stop() (err error) {
-	return fmt.Errorf("Stopping machines is not possible on OVH Cloud")
+	log.Debugf("Stopping OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
+
+	client, err := d.getClient()
+	if err != nil {
+		return err
+	}
+
+	if err = client.StopInstance(d.ProjectID, d.InstanceID); err != nil {
+		return err
+	}
+
+	_, err = d.waitForInstanceStatus("SHUTOFF")
+	return err
 }
