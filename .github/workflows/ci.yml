@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - issue-4-mks-mvp
   pull_request:
   workflow_dispatch:
 
