@@ -108,9 +108,11 @@ docker-machine create -d ovh \
 
 Current MVP scope:
 - create cluster
-- list clusters (helper path)
+- get/list cluster state (helper path + hosted GetState)
 - delete cluster
 - nodepool create + desiredNodes scale request model
+
+Registration/import notes: `docs/hosted-mks-registration.md`
 
 ### Vrack integration
 

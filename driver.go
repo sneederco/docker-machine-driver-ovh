@@ -560,12 +560,41 @@ func (d *Driver) publicSSHKeyPath() string {
 
 // GetState return instance status
 func (d *Driver) GetState() (state.State, error) {
-	log.Debugf("Get status for OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
-
 	client, err := d.getClient()
 	if err != nil {
 		return state.None, err
 	}
+
+	if d.HostedMKS {
+		if d.MKSClusterID == "" {
+			return state.None, nil
+		}
+
+		cluster, err := client.GetMKSCluster(d.ProjectID, d.MKSClusterID)
+		if err != nil {
+			return state.None, err
+		}
+
+		log.Debugf("OVH MKS cluster", map[string]interface{}{
+			"ClusterID": d.MKSClusterID,
+			"State":     cluster.Status,
+		})
+
+		switch cluster.Status {
+		case "READY":
+			return state.Running, nil
+		case "CREATING", "UPDATING":
+			return state.Starting, nil
+		case "DELETING":
+			return state.Stopping, nil
+		case "ERROR":
+			return state.Error, nil
+		default:
+			return state.None, nil
+		}
+	}
+
+	log.Debugf("Get status for OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
 
 	instance, err := client.GetInstance(d.ProjectID, d.InstanceID)
 	if err != nil {
@@ -651,6 +680,10 @@ func (d *Driver) Remove() error {
 
 // Restart this docker-machine
 func (d *Driver) Restart() error {
+	if d.HostedMKS {
+		return fmt.Errorf("restart is not supported in hosted MKS mode")
+	}
+
 	log.Debugf("Restarting OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
 
 	client, err := d.getClient()
@@ -678,6 +711,10 @@ func (d *Driver) Kill() (err error) {
 
 // Start starts a stopped machine
 func (d *Driver) Start() (err error) {
+	if d.HostedMKS {
+		return fmt.Errorf("start is not supported in hosted MKS mode")
+	}
+
 	log.Debugf("Starting OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
 
 	client, err := d.getClient()
@@ -695,6 +732,10 @@ func (d *Driver) Start() (err error) {
 
 // Stop stops a running machine
 func (d *Driver) Stop() (err error) {
+	if d.HostedMKS {
+		return fmt.Errorf("stop is not supported in hosted MKS mode")
+	}
+
 	log.Debugf("Stopping OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
 
 	client, err := d.getClient()

@@ -478,6 +478,13 @@ func (a *API) CreateMKSCluster(projectID string, req MKSClusterCreateReq) (clust
 	return cluster, err
 }
 
+// GetMKSCluster gets a managed kubernetes cluster by ID.
+func (a *API) GetMKSCluster(projectID, clusterID string) (cluster *MKSCluster, err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube/%s", projectID, clusterID)
+	err = a.client.Get(url, &cluster)
+	return cluster, err
+}
+
 // DeleteMKSCluster deletes a managed kubernetes cluster.
 func (a *API) DeleteMKSCluster(projectID, clusterID string) (err error) {
 	url := fmt.Sprintf("/cloud/project/%s/kube/%s", projectID, clusterID)
@@ -486,6 +493,13 @@ func (a *API) DeleteMKSCluster(projectID, clusterID string) (err error) {
 		err = nil
 	}
 	return err
+}
+
+// ListMKSNodePools lists nodepools in a managed kubernetes cluster.
+func (a *API) ListMKSNodePools(projectID, clusterID string) (nodePools []MKSNodePool, err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool", projectID, clusterID)
+	err = a.client.Get(url, &nodePools)
+	return nodePools, err
 }
 
 // CreateMKSNodePool creates a nodepool in a managed kubernetes cluster.
