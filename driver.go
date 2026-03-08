@@ -139,7 +139,7 @@ func (d *Driver) getClient() (api *API, err error) {
 	if d.client == nil {
 		client, err := NewAPI(d.Endpoint, d.ApplicationKey, d.ApplicationSecret, d.ConsumerKey)
 		if err != nil {
-			return nil, fmt.Errorf("Could not create a connection to OVH API. You may want to visit: https://github.com/yadutaf/docker-machine-driver-ovh#example-usage. The original error was: %s", err)
+			return nil, fmt.Errorf("Could not create a connection to OVH API. You may want to visit: https://github.com/sneederco/docker-machine-driver-ovh#example-usage. The original error was: %s", err)
 		}
 		d.client = client
 	}

@@ -13,10 +13,8 @@ deploy:
   file_glob: true
   file: 'pkg/docker-machine-driver-ovh-*.tar.gz'
   on:
-    repo: yadutaf/docker-machine-driver-ovh
+    repo: sneederco/docker-machine-driver-ovh
     tags: true
 
 notifications:
-  email:
-    recipients:
-      - jt+travis-docker-machine@yadutaf.fr
+  email: false

@@ -1,4 +1,4 @@
-[![OVH Cloud driver for Docker-Machine](https://raw.githubusercontent.com/yadutaf/docker-machine-driver-ovh/master/img/logo.png)](https://github.com/yadutaf/docker-machine-driver-ovh)
+[![OVH Cloud driver for Docker-Machine](https://raw.githubusercontent.com/sneederco/docker-machine-driver-ovh/master/img/logo.png)](https://github.com/sneederco/docker-machine-driver-ovh)
 
 ```bash
 # Create your first OVH Cloud Docker machine
@@ -14,8 +14,8 @@ API credentials, you may visit https://api.ovh.com. See
 The easiest way to install ovh docker-machine driver is to:
 
 ```bash
-go get github.com/yadutaf/docker-machine-driver-ovh
-go install github.com/yadutaf/docker-machine-driver-ovh
+go get github.com/sneederco/docker-machine-driver-ovh
+go install github.com/sneederco/docker-machine-driver-ovh
 ln -s $(go env GOPATH)/bin/docker-machine-driver-ovh /usr/local/bin/docker-machine-driver-ovh
 ```
 
@@ -133,8 +133,8 @@ With the `--ovh-ssh-key` option you can define a key name (already present in yo
 ### Get the sources
 
 ```bash
-go get github.com/yadutaf/docker-machine-driver-ovh
-cd $(go env GOPATH)/src/github.com/yadutaf/docker-machine-driver-ovh
+go get github.com/sneederco/docker-machine-driver-ovh
+cd $(go env GOPATH)/src/github.com/sneederco/docker-machine-driver-ovh
 ```
 
 ### Build the driver
@@ -147,7 +147,7 @@ To test the driver make sure your current build directory has the highest
 priority in your ``$PATH`` so that docker-machine can find it.
 
 ```
-export PATH=$(go env GOPATH)/src/github.com/yadutaf/docker-machine-driver-ovh:$PATH
+export PATH=$(go env GOPATH)/src/github.com/sneederco/docker-machine-driver-ovh:$PATH
 ```
 
 ## Related links
@@ -155,8 +155,12 @@ export PATH=$(go env GOPATH)/src/github.com/yadutaf/docker-machine-driver-ovh:$P
 - **OVH Cloud console**: https://www.ovh.com/manager/cloud/index.html
 - **OVH Cloud offers**: https://www.ovh.com/us/cloud/
 - **Docker Machine**: https://docs.docker.com/machine/
-- **Contribute**: https://github.com/yadutaf/docker-machine-driver-ovh
-- **Report bugs**: https://github.com/yadutaf/docker-machine-driver-ovh/issues
+- **Contribute**: https://github.com/sneederco/docker-machine-driver-ovh
+- **Report bugs**: https://github.com/sneederco/docker-machine-driver-ovh/issues
+
+## OVH Program Traceability (Issue-linked)
+
+- `docs/ISSUES-2-4-5-TRACE.md` — traceability for Epic #2 and WS2/WS3 (#4/#5), including command consistency checks and blocker ownership.
 
 ## License
 
