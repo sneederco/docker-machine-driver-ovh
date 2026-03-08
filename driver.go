@@ -223,39 +223,53 @@ func (d *Driver) PreCreateCheck() error {
 	}
 	log.Debug("Found project id ", d.ProjectID)
 
+	if strings.TrimSpace(d.RegionName) == "" {
+		return fmt.Errorf("Missing required value for '--ovh-region'")
+	}
+	if strings.TrimSpace(d.FlavorName) == "" {
+		return fmt.Errorf("Missing required value for '--ovh-flavor'")
+	}
+	if strings.TrimSpace(d.ImageID) == "" {
+		return fmt.Errorf("Missing required value for '--ovh-image'")
+	}
+
 	// Validate region
 	log.Debug("Validating region")
 	regions, err := client.GetRegions(d.ProjectID)
 	if err != nil {
-		return err
-	}
-	var ok bool
-	for _, region := range regions {
-		if region == d.RegionName {
-			ok = true
-			break
+		if !containsIgnoreCase(fallbackRegions, d.RegionName) {
+			return err
 		}
-	}
-	if ok != true {
-		return fmt.Errorf("Invalid region %s. For a list of valid ovh regions, please visis %s", d.RegionName, CustomerInterface)
+		log.Warnf("Could not fetch regions from OVH API, accepting fallback region %s", d.RegionName)
+	} else if !containsIgnoreCase(regions, d.RegionName) {
+		return fmt.Errorf("Invalid region %s. For a list of valid OVH regions, please visit %s", d.RegionName, CustomerInterface)
 	}
 
 	// Validate flavor
 	log.Debug("Validating flavor")
 	flavor, err := client.GetFlavorByName(d.ProjectID, d.RegionName, d.FlavorName)
 	if err != nil {
-		return err
+		if !containsIgnoreCase(fallbackFlavors, d.FlavorName) {
+			return err
+		}
+		log.Warnf("Could not resolve flavor via OVH API, using fallback value %s", d.FlavorName)
+		d.FlavorID = d.FlavorName
+	} else {
+		d.FlavorID = flavor.ID
 	}
-	d.FlavorID = flavor.ID
 	log.Debug("Found flavor id ", d.FlavorID)
 
 	// Validate image
 	log.Debug("Validating image")
 	image, err := client.GetImageByName(d.ProjectID, d.RegionName, d.ImageID)
 	if err != nil {
-		return err
+		if !containsIgnoreCase(fallbackImages, d.ImageID) {
+			return err
+		}
+		log.Warnf("Could not resolve image via OVH API, using fallback value %s", d.ImageID)
+	} else {
+		d.ImageID = image.ID
 	}
-	d.ImageID = image.ID
 	log.Debug("Found image id ", d.ImageID)
 
 	// Validate private network
@@ -294,6 +308,15 @@ func (d *Driver) PreCreateCheck() error {
 	}
 
 	return nil
+}
+
+func containsIgnoreCase(items []string, value string) bool {
+	for _, item := range items {
+		if strings.EqualFold(item, value) {
+			return true
+		}
+	}
+	return false
 }
 
 // copied from openstack driver
