@@ -135,6 +135,57 @@ type Instance struct {
 	MonthlyBilling bool          `json:"monthlyBilling"`
 }
 
+// MKSClusterCreateReq defines the fields for OVH Managed Kubernetes cluster creation.
+type MKSClusterCreateReq struct {
+	Name             string                 `json:"name"`
+	Region           string                 `json:"region"`
+	Version          string                 `json:"version,omitempty"`
+	PrivateNetworkID string                 `json:"privateNetworkId,omitempty"`
+	UpdatePolicy     string                 `json:"updatePolicy,omitempty"`
+	Customization    map[string]interface{} `json:"customization,omitempty"`
+}
+
+// MKSCluster is a go representation of OVH Managed Kubernetes Service cluster.
+type MKSCluster struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Region           string `json:"region"`
+	Version          string `json:"version"`
+	Status           string `json:"status"`
+	PrivateNetworkID string `json:"privateNetworkId,omitempty"`
+}
+
+// MKSClusters is a list of managed kubernetes clusters.
+type MKSClusters []MKSCluster
+
+// MKSNodePoolCreateReq defines fields for creating a nodepool on an MKS cluster.
+type MKSNodePoolCreateReq struct {
+	Name           string   `json:"name"`
+	FlavorName     string   `json:"flavorName"`
+	DesiredNodes   int      `json:"desiredNodes"`
+	MinNodes       int      `json:"minNodes,omitempty"`
+	MaxNodes       int      `json:"maxNodes,omitempty"`
+	MonthlyBilling bool     `json:"monthlyBilling,omitempty"`
+	AntiAffinity   bool     `json:"antiAffinity,omitempty"`
+	Autoscale      bool     `json:"autoscale,omitempty"`
+	Template       string   `json:"template,omitempty"`
+	Availability   []string `json:"availabilityZones,omitempty"`
+}
+
+// MKSNodePoolScaleReq defines fields for nodepool scaling.
+type MKSNodePoolScaleReq struct {
+	DesiredNodes int `json:"desiredNodes"`
+}
+
+// MKSNodePool is a go representation of an OVH MKS nodepool.
+type MKSNodePool struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	FlavorName   string `json:"flavorName"`
+	DesiredNodes int    `json:"desiredNodes"`
+	Status       string `json:"status"`
+}
+
 // RebootReq defines the fields for a VM reboot
 type RebootReq struct {
 	Type string `json:"type"`
@@ -410,5 +461,58 @@ func (a *API) StartInstance(projectID, instanceID string) (err error) {
 func (a *API) StopInstance(projectID, instanceID string) (err error) {
 	url := fmt.Sprintf("/cloud/project/%s/instance/%s/stop", projectID, instanceID)
 	err = a.client.Post(url, nil, nil)
+	return err
+}
+
+// ListMKSClusters returns managed kubernetes clusters in a given project.
+func (a *API) ListMKSClusters(projectID string) (clusters MKSClusters, err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube", projectID)
+	err = a.client.Get(url, &clusters)
+	return clusters, err
+}
+
+// CreateMKSCluster creates a managed kubernetes cluster.
+func (a *API) CreateMKSCluster(projectID string, req MKSClusterCreateReq) (cluster *MKSCluster, err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube", projectID)
+	err = a.client.Post(url, req, &cluster)
+	return cluster, err
+}
+
+// GetMKSCluster gets a managed kubernetes cluster by ID.
+func (a *API) GetMKSCluster(projectID, clusterID string) (cluster *MKSCluster, err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube/%s", projectID, clusterID)
+	err = a.client.Get(url, &cluster)
+	return cluster, err
+}
+
+// DeleteMKSCluster deletes a managed kubernetes cluster.
+func (a *API) DeleteMKSCluster(projectID, clusterID string) (err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube/%s", projectID, clusterID)
+	err = a.client.Delete(url, nil)
+	if apierror, ok := err.(*ovh.APIError); ok && apierror.Code == 404 {
+		err = nil
+	}
+	return err
+}
+
+// ListMKSNodePools lists nodepools in a managed kubernetes cluster.
+func (a *API) ListMKSNodePools(projectID, clusterID string) (nodePools []MKSNodePool, err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool", projectID, clusterID)
+	err = a.client.Get(url, &nodePools)
+	return nodePools, err
+}
+
+// CreateMKSNodePool creates a nodepool in a managed kubernetes cluster.
+func (a *API) CreateMKSNodePool(projectID, clusterID string, req MKSNodePoolCreateReq) (nodePool *MKSNodePool, err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool", projectID, clusterID)
+	err = a.client.Post(url, req, &nodePool)
+	return nodePool, err
+}
+
+// ScaleMKSNodePool updates desired node count in a managed kubernetes nodepool.
+func (a *API) ScaleMKSNodePool(projectID, clusterID, nodePoolID string, desiredNodes int) (err error) {
+	url := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool/%s", projectID, clusterID, nodePoolID)
+	req := MKSNodePoolScaleReq{DesiredNodes: desiredNodes}
+	err = a.client.Put(url, req, nil)
 	return err
 }
