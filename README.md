@@ -161,6 +161,7 @@ export PATH=$(go env GOPATH)/src/github.com/sneederco/docker-machine-driver-ovh:
 ## OVH Program Traceability (Issue-linked)
 
 - `docs/ISSUES-2-4-5-TRACE.md` — traceability for Epic #2 and WS2/WS3 (#4/#5), including command consistency checks and blocker ownership.
+- `docs/ISSUE-4-HOSTED-MKS-SOP.md` — hosted MKS create/delete/scale runbook with hourly billing teardown and rollback checklist.
 
 ## License
 
