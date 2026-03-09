@@ -1,10 +1,41 @@
-PKG = "docker-machine-driver-ovh"
-DEPS = $(shell go list -f '{{range .Imports}}{{.}} {{end}}' ./... | tr ' ' '\n' | grep "github.com" | grep -v $(PKG) | sort | uniq | tr '\n' ' ')
+# Makefile for docker-machine-driver-ovh
 
-vendor:
-	go get -u github.com/FiloSottile/gvt
-	for dep in $(DEPS); do            \
-		$$GOPATH/bin/gvt fetch $$dep; \
-	done
+.PHONY: all build test lint clean install deps
 
-.PHONY: vendor
+# Binary name
+BINARY := docker-machine-driver-ovh
+
+# Go parameters
+GOCMD := go
+GOBUILD := $(GOCMD) build
+GOCLEAN := $(GOCMD) clean
+GOTEST := $(GOCMD) test
+GOGET := $(GOCMD) get
+GOMOD := $(GOCMD) mod
+
+# Build flags
+LDFLAGS := -w -s
+
+all: build
+
+build:
+	$(GOBUILD) -ldflags "$(LDFLAGS)" -o $(BINARY) .
+
+test:
+	$(GOTEST) -v ./...
+
+lint:
+	golangci-lint run
+
+clean:
+	$(GOCLEAN)
+	rm -f $(BINARY)
+
+install:
+	$(GOBUILD) -ldflags "$(LDFLAGS)" -o $(GOPATH)/bin/$(BINARY) .
+
+deps:
+	$(GOMOD) download
+	$(GOMOD) tidy
+
+.DEFAULT_GOAL := build
