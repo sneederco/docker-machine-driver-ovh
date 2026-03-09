@@ -203,6 +203,7 @@ type NetworkParams []NetworkParam
 
 // InstanceReq defines the fields for a VM creation
 type InstanceReq struct {
+	UserData       string        `json:"userData,omitempty"`
 	Name           string        `json:"name"`
 	FlavorID       string        `json:"flavorId"`
 	ImageID        string        `json:"imageId"`
@@ -739,9 +740,10 @@ func (a *API) GetPrivateNetworkByName(ctx context.Context, projectID, networkNam
 }
 
 // CreateInstance starts a new public cloud instance and returns resulting object
-func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, flavorID, imageID, region string, networkIDs []string, monthlyBilling bool) (*Instance, error) {
+func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, flavorID, imageID, region, userData string, networkIDs []string, monthlyBilling bool) (*Instance, error) {
 	var instance Instance
 	req := InstanceReq{
+		UserData:       userData,
 		Name:           name,
 		SshkeyID:       pubkeyID,
 		FlavorID:       flavorID,

@@ -651,6 +651,9 @@ func (d *Driver) createInstance(ctx context.Context, client *API) error {
 	log.Debugf("  Flavor: %s (ID: %s)", d.FlavorName, d.FlavorID)
 	log.Debugf("  Image: %s (ID: %s)", d.ImageName, d.ImageID)
 	log.Debugf("  Billing: %s", d.BillingPeriod)
+	if d.Userdata != "" {
+		log.Debugf("  Userdata: %d bytes", len(d.Userdata))
+	}
 
 	monthlyBilling := d.BillingPeriod == "monthly"
 
@@ -662,6 +665,7 @@ func (d *Driver) createInstance(ctx context.Context, client *API) error {
 		d.FlavorID,
 		d.ImageID,
 		d.RegionName,
+		d.Userdata,
 		d.NetworkIDs,
 		monthlyBilling,
 	)
