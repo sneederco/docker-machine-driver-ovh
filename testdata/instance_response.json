@@ -1,0 +1,37 @@
+{
+  "id": "instance-abc123",
+  "name": "docker-machine-test",
+  "status": "ACTIVE",
+  "created": "2024-03-09T12:00:00Z",
+  "region": "US-EAST-VA-1",
+  "image": {
+    "id": "ubuntu-24-04-uuid",
+    "name": "Ubuntu 24.04",
+    "type": "linux"
+  },
+  "flavor": {
+    "id": "b3-8-flavor-uuid",
+    "name": "b3-8",
+    "vcpus": 2,
+    "ram": 8192,
+    "disk": 50
+  },
+  "sshKey": {
+    "id": "sshkey-xyz789",
+    "name": "docker-machine-key",
+    "fingerPrint": "ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89"
+  },
+  "ipAddresses": [
+    {
+      "ip": "203.0.113.42",
+      "type": "public",
+      "version": 4
+    },
+    {
+      "ip": "192.168.1.10",
+      "type": "private",
+      "version": 4
+    }
+  ],
+  "monthlyBilling": false
+}

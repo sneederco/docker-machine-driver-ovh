@@ -1,0 +1,22 @@
+#cloud-config
+# Sample cloud-init userdata for testing
+
+packages:
+  - docker.io
+  - curl
+  - wget
+
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker ubuntu
+
+write_files:
+  - path: /etc/motd
+    content: |
+      ===================================
+      Docker Machine OVH Test Instance
+      ===================================
+    permissions: '0644'
+
+final_message: "Docker Machine OVH instance is ready!"
