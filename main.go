@@ -9,9 +9,10 @@ import (
 const (
 	DefaultSecurityGroup = "default"
 	DefaultProjectName   = "docker-machine"
-	DefaultFlavorName    = "vps-ssd-1"
-	DefaultRegionName    = "GRA1"
-	DefaultImageName     = "Ubuntu 16.04"
+	DefaultEndpoint      = "ovh-us"
+	DefaultFlavorName    = "b3-8"
+	DefaultRegionName    = "US-EAST-VA-1"
+	DefaultImageName     = "Ubuntu 24.04"
 	DefaultSSHUserName   = "ubuntu"
 	DefaultBillingPeriod = "hourly"
 )
