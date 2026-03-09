@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -18,24 +19,40 @@ import (
 )
 
 const (
-	statusTimeout = 200
+	statusTimeout         = 300 // 5 minutes for instance operations
+	statusCheckInterval   = 5 * time.Second
+	defaultContextTimeout = 15 * time.Minute
 )
 
 var (
-	fallbackRegions = []string{"GRA1", "GRA3", "SBG1", "SBG5", "BHS5", "DE1", "UK1", "WAW1"}
-	fallbackFlavors = []string{"vps-ssd-1", "vps-ssd-2", "vps-ssd-3", "b2-7", "b2-15", "b2-30"}
-	fallbackImages  = []string{"Ubuntu 22.04", "Ubuntu 20.04", "Debian 12", "Debian 11"}
+	fallbackRegions = []string{"US-EAST-VA-1", "US-WEST-OR-1", "CA-EAST-BHS-1", "GRA1", "GRA3", "SBG1", "SBG5", "BHS5", "DE1", "UK1", "WAW1"}
+	fallbackFlavors = []string{"b3-8", "b2-7", "b2-15", "vps-ssd-1", "vps-ssd-2"}
+	fallbackImages  = []string{"Ubuntu 24.04", "Ubuntu 22.04", "Ubuntu 20.04", "Debian 12"}
 )
 
-// Driver is a machine driver for OVH.
+// Driver is a machine driver for OVH Public Cloud.
 type Driver struct {
 	*drivers.BaseDriver
 
-	// Command line parameters
-	ProjectName        string
-	FlavorName         string
-	RegionName         string
+	// API credentials (overridable)
+	ApplicationKey    string
+	ApplicationSecret string
+	ConsumerKey       string
+	Endpoint          string
+
+	// Required parameters
+	ProjectName string
+	ProjectID   string
+	RegionName  string
+	FlavorName  string
+	ImageName   string
+
+	// Optional parameters
 	PrivateNetworkName string
+	KeyPairName        string
+	BillingPeriod      string
+	UserdataPath       string
+	Tags               string
 
 	// Hosted MKS mode parameters
 	HostedMKS              bool
@@ -47,30 +64,19 @@ type Driver struct {
 	MKSClusterID           string
 	MKSNodePoolID          string
 
-	// Ovh specific parameters
-	BillingPeriod string
-	Endpoint      string
-
-	// Internal ids
-	ProjectID   string
+	// Internal state
 	FlavorID    string
 	ImageID     string
 	InstanceID  string
-	KeyPairName string
 	KeyPairID   string
 	NetworkIDs  []string
+	Userdata    string
 
-	// Overloaded credentials
-	ApplicationKey    string
-	ApplicationSecret string
-	ConsumerKey       string
-
-	// internal
+	// API client
 	client *API
 }
 
-// GetCreateFlags registers the "machine create" flags recognized by this driver, including
-// their help text and defaults.
+// GetCreateFlags registers the "machine create" flags recognized by this driver.
 func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 	return []mcnflag.Flag{
 		mcnflag.StringFlag{
@@ -93,8 +99,8 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-endpoint",
-			Usage: "OVH Cloud API endpoint. Default: ovh-eu",
-			Value: "",
+			Usage: "OVH Cloud API endpoint (ovh-us, ovh-eu, ovh-ca). Default: ovh-us",
+			Value: DefaultEndpoint,
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-project",
@@ -103,38 +109,48 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-region",
-			Usage: "OVH Cloud region name. Fallback options: GRA1, GRA3, SBG1, SBG5, BHS5, DE1, UK1, WAW1",
+			Usage: "OVH Cloud region name. Default: US-EAST-VA-1",
 			Value: DefaultRegionName,
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-flavor",
-			Usage: "OVH Cloud flavor name or id. Fallback options: vps-ssd-1, vps-ssd-2, vps-ssd-3, b2-7, b2-15, b2-30",
+			Usage: "OVH Cloud flavor name or id. Default: b3-8",
 			Value: DefaultFlavorName,
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-image",
-			Usage: "OVH Cloud image name or id. Fallback options: Ubuntu 22.04, Ubuntu 20.04, Debian 12, Debian 11",
+			Usage: "OVH Cloud image name or id. Default: Ubuntu 24.04",
 			Value: DefaultImageName,
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-private-network",
-			Usage: "OVH Cloud (private) network name or vlan number. Default: public network",
+			Usage: "OVH Cloud private network name or vlan number. Default: public network only",
 			Value: "",
 		},
 		mcnflag.StringFlag{
-			Name:  "ovh-ssh-key",
+			Name:  "ovh-ssh-key-name",
 			Usage: "OVH Cloud ssh key name or id to use. Default: generate a random name",
 			Value: "",
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-ssh-user",
-			Usage: "OVH Cloud ssh username to use. Default: machine",
+			Usage: "OVH Cloud ssh username to use. Default: ubuntu",
 			Value: DefaultSSHUserName,
 		},
 		mcnflag.StringFlag{
 			Name:  "ovh-billing-period",
 			Usage: "OVH Cloud billing period (hourly or monthly). Default: hourly",
 			Value: DefaultBillingPeriod,
+		},
+		mcnflag.StringFlag{
+			Name:  "ovh-userdata",
+			Usage: "OVH Cloud custom cloud-init userdata script path",
+			Value: "",
+		},
+		mcnflag.StringFlag{
+			Name:  "ovh-tags",
+			Usage: "OVH Cloud instance metadata tags (comma-separated)",
+			Value: "",
 		},
 		mcnflag.BoolFlag{
 			Name:  "ovh-hosted-mks",
@@ -173,34 +189,40 @@ func (d *Driver) DriverName() string {
 	return "ovh"
 }
 
-// getClient returns an OVH API client
-func (d *Driver) getClient() (api *API, err error) {
+// getClient returns an OVH API client, creating it if needed
+func (d *Driver) getClient() (*API, error) {
 	if d.client == nil {
 		client, err := NewAPI(d.Endpoint, d.ApplicationKey, d.ApplicationSecret, d.ConsumerKey)
 		if err != nil {
-			return nil, fmt.Errorf("Could not create a connection to OVH API. You may want to visit: https://github.com/sneederco/docker-machine-driver-ovh#example-usage. The original error was: %s", err)
+			return nil, fmt.Errorf("failed to create OVH API client. Visit https://github.com/sneederco/docker-machine-driver-ovh#example-usage for setup instructions. Error: %w", err)
 		}
 		d.client = client
 	}
-
 	return d.client, nil
 }
 
 // SetConfigFromFlags assigns and verifies the command-line arguments presented to the driver.
 func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
+	// API credentials
 	d.ApplicationKey = flags.String("ovh-application-key")
 	d.ApplicationSecret = flags.String("ovh-application-secret")
 	d.ConsumerKey = flags.String("ovh-consumer-key")
-
-	// Store configuration parameters as-is
 	d.Endpoint = flags.String("ovh-endpoint")
+
+	// Required configuration
 	d.ProjectName = flags.String("ovh-project")
 	d.RegionName = flags.String("ovh-region")
 	d.FlavorName = flags.String("ovh-flavor")
-	d.ImageID = flags.String("ovh-image")
+	d.ImageName = flags.String("ovh-image")
+
+	// Optional configuration
 	d.PrivateNetworkName = flags.String("ovh-private-network")
-	d.KeyPairName = flags.String("ovh-ssh-key")
+	d.KeyPairName = flags.String("ovh-ssh-key-name")
 	d.BillingPeriod = flags.String("ovh-billing-period")
+	d.UserdataPath = flags.String("ovh-userdata")
+	d.Tags = flags.String("ovh-tags")
+
+	// MKS configuration
 	d.HostedMKS = flags.Bool("ovh-hosted-mks")
 	d.MKSClusterName = flags.String("ovh-mks-cluster-name")
 	d.MKSVersion = flags.String("ovh-mks-version")
@@ -208,18 +230,21 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.MKSNodePoolFlavor = flags.String("ovh-mks-nodepool-flavor")
 	d.MKSNodePoolDesiredSize = flags.Int("ovh-mks-nodepool-size")
 
-	// Swarm configuration, must be in each driver
+	// Swarm configuration
 	d.SwarmMaster = flags.Bool("swarm-master")
 	d.SwarmHost = flags.String("swarm-host")
 	d.SwarmDiscovery = flags.String("swarm-discovery")
 
+	// SSH configuration
 	d.SSHUser = flags.String("ovh-ssh-user")
 
 	return nil
 }
 
-// PreCreateCheck does the network side validation
+// PreCreateCheck validates the driver configuration before creating an instance.
 func (d *Driver) PreCreateCheck() error {
+	ctx := context.Background()
+
 	client, err := d.getClient()
 	if err != nil {
 		return err
@@ -228,289 +253,409 @@ func (d *Driver) PreCreateCheck() error {
 	// Validate billing period
 	log.Debug("Validating billing period")
 	if d.BillingPeriod != "monthly" && d.BillingPeriod != "hourly" {
-		return fmt.Errorf("Invalid billing period '%s'. Please select one of 'hourly', 'monthly'", d.BillingPeriod)
+		return fmt.Errorf("invalid billing period '%s'. Must be 'hourly' or 'monthly'", d.BillingPeriod)
 	}
-	log.Debug("Selecting billing period", d.BillingPeriod)
+	log.Debugf("Selected billing period: %s", d.BillingPeriod)
 
-	// Validate project id
-	log.Debug("Validating project")
-	if d.ProjectName != "" {
-		project, err := client.GetProjectByName(d.ProjectName)
+	// Load userdata if provided
+	if d.UserdataPath != "" {
+		log.Debugf("Loading userdata from: %s", d.UserdataPath)
+		userdataBytes, err := ioutil.ReadFile(d.UserdataPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to read userdata file '%s': %w", d.UserdataPath, err)
 		}
-		d.ProjectID = project.ID
-	} else {
-		projects, err := client.GetProjects()
-		if err != nil {
-			return err
-		}
-
-		// If there is only one project, take it
-		if len(projects) == 1 {
-			d.ProjectID = projects[0]
-		} else if len(projects) == 0 {
-			return fmt.Errorf("No Cloud project could be found. To create a new one, please visit %s", CustomerInterface)
-		} else {
-			// Build a list of project names to help choose one
-			var projectNames []string
-			for _, projectID := range projects {
-				project, err := client.GetProject(projectID)
-				if err != nil {
-					projectNames = append(projectNames, projectID)
-				} else {
-					projectNames = append(projectNames, project.Name)
-				}
-			}
-
-			return fmt.Errorf("Multiple Cloud project found (%s), to select one, use '--ovh-project' option", strings.Join(projectNames[:], ", "))
-		}
+		d.Userdata = string(userdataBytes)
+		log.Debug("Userdata loaded successfully")
 	}
-	log.Debug("Found project id ", d.ProjectID)
 
-	if strings.TrimSpace(d.RegionName) == "" {
-		return fmt.Errorf("Missing required value for '--ovh-region'")
+	// Resolve project ID
+	if err := d.resolveProject(ctx, client); err != nil {
+		return err
 	}
+
+	// Validate required parameters based on mode
 	if d.HostedMKS {
 		if strings.TrimSpace(d.MKSClusterName) == "" {
-			return fmt.Errorf("Missing required value for '--ovh-mks-cluster-name' when '--ovh-hosted-mks' is enabled")
+			return fmt.Errorf("missing required value for '--ovh-mks-cluster-name' when '--ovh-hosted-mks' is enabled")
 		}
 		if strings.TrimSpace(d.MKSNodePoolFlavor) == "" {
-			return fmt.Errorf("Missing required value for '--ovh-mks-nodepool-flavor' when '--ovh-hosted-mks' is enabled")
+			return fmt.Errorf("missing required value for '--ovh-mks-nodepool-flavor' when '--ovh-hosted-mks' is enabled")
 		}
 		if d.MKSNodePoolDesiredSize < 1 {
-			return fmt.Errorf("Invalid value %d for '--ovh-mks-nodepool-size'. Must be >= 1", d.MKSNodePoolDesiredSize)
+			return fmt.Errorf("invalid value %d for '--ovh-mks-nodepool-size'. Must be >= 1", d.MKSNodePoolDesiredSize)
 		}
-	} else {
-		if strings.TrimSpace(d.FlavorName) == "" {
-			return fmt.Errorf("Missing required value for '--ovh-flavor'")
-		}
-		if strings.TrimSpace(d.ImageID) == "" {
-			return fmt.Errorf("Missing required value for '--ovh-image'")
-		}
+		log.Debug("Hosted MKS mode validated successfully")
+		return nil
+	}
+
+	// Standard VM mode validation
+	if strings.TrimSpace(d.RegionName) == "" {
+		return fmt.Errorf("missing required value for '--ovh-region'")
+	}
+	if strings.TrimSpace(d.FlavorName) == "" {
+		return fmt.Errorf("missing required value for '--ovh-flavor'")
+	}
+	if strings.TrimSpace(d.ImageName) == "" {
+		return fmt.Errorf("missing required value for '--ovh-image'")
 	}
 
 	// Validate region
-	log.Debug("Validating region")
-	regions, err := client.GetRegions(d.ProjectID)
-	if err != nil {
-		if !containsIgnoreCase(fallbackRegions, d.RegionName) {
-			return err
-		}
-		log.Warnf("Could not fetch regions from OVH API, accepting fallback region %s", d.RegionName)
-	} else if !containsIgnoreCase(regions, d.RegionName) {
-		return fmt.Errorf("Invalid region %s. For a list of valid OVH regions, please visit %s", d.RegionName, CustomerInterface)
-	}
-
-	if d.HostedMKS {
-		log.Debug("Hosted MKS mode selected; skipping VM flavor/image/ssh network validation")
-		return nil
+	if err := d.validateRegion(ctx, client); err != nil {
+		return err
 	}
 
 	// Validate flavor
-	log.Debug("Validating flavor")
-	flavor, err := client.GetFlavorByName(d.ProjectID, d.RegionName, d.FlavorName)
-	if err != nil {
-		if !containsIgnoreCase(fallbackFlavors, d.FlavorName) {
-			return err
-		}
-		log.Warnf("Could not resolve flavor via OVH API, using fallback value %s", d.FlavorName)
-		d.FlavorID = d.FlavorName
-	} else {
-		d.FlavorID = flavor.ID
+	if err := d.validateFlavor(ctx, client); err != nil {
+		return err
 	}
-	log.Debug("Found flavor id ", d.FlavorID)
 
 	// Validate image
-	log.Debug("Validating image")
-	image, err := client.GetImageByName(d.ProjectID, d.RegionName, d.ImageID)
-	if err != nil {
-		if !containsIgnoreCase(fallbackImages, d.ImageID) {
-			return err
-		}
-		log.Warnf("Could not resolve image via OVH API, using fallback value %s", d.ImageID)
-	} else {
-		d.ImageID = image.ID
-	}
-	log.Debug("Found image id ", d.ImageID)
-
-	// Validate private network
-	log.Debug("Validating private network")
-	if d.PrivateNetworkName != "" {
-		privateNetwork, err := client.GetPrivateNetworkByName(d.ProjectID, d.PrivateNetworkName)
-		if err != nil {
-			return err
-		}
-		d.NetworkIDs = append(d.NetworkIDs, privateNetwork.ID)
-		log.Debug("Found private network id ", privateNetwork.ID)
-
-		publicNetworkID, err := client.GetPublicNetworkID(d.ProjectID)
-		if err != nil {
-			return err
-		}
-		d.NetworkIDs = append(d.NetworkIDs, publicNetworkID)
-		log.Debug("Found public network id ", publicNetworkID)
-
-	} else {
-		log.Debug("No private network found. Using public network")
+	if err := d.validateImage(ctx, client); err != nil {
+		return err
 	}
 
-	// Use a common key or create a machine specific one
-	keyPath := filepath.Join(d.StorePath, "sshkeys", d.KeyPairName)
-	if len(d.KeyPairName) != 0 {
-		if _, err := os.Stat(keyPath); err == nil {
-			d.SSHKeyPath = keyPath
-		} else {
-			log.Debug("SSH key", keyPath, "does not exist. Assuming the key (", d.KeyPairName, ") is in '~/.ssh/' or in a SSH agent.")
-		}
-	} else {
-		d.KeyPairName = fmt.Sprintf("%s-%s", d.MachineName, mcnutils.GenerateRandomID())
-		sanitizeKeyPairName(&d.KeyPairName)
-		d.SSHKeyPath = d.ResolveStorePath(d.KeyPairName)
+	// Validate private network if specified
+	if err := d.validateNetwork(ctx, client); err != nil {
+		return err
+	}
+
+	// Prepare SSH key
+	if err := d.prepareSSHKey(); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func containsIgnoreCase(items []string, value string) bool {
-	for _, item := range items {
-		if strings.EqualFold(item, value) {
-			return true
+// resolveProject resolves the project name to a project ID.
+func (d *Driver) resolveProject(ctx context.Context, client *API) error {
+	log.Debug("Resolving project")
+
+	if d.ProjectName != "" {
+		project, err := client.GetProjectByName(ctx, d.ProjectName)
+		if err != nil {
+			return fmt.Errorf("failed to find project '%s': %w", d.ProjectName, err)
+		}
+		d.ProjectID = project.ID
+		log.Debugf("Found project '%s' with ID: %s", project.Name, d.ProjectID)
+		return nil
+	}
+
+	// No project specified, try to auto-select
+	projects, err := client.GetProjects(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list projects: %w", err)
+	}
+
+	if len(projects) == 0 {
+		return fmt.Errorf("no Cloud projects found. Create one at: %s", CustomerInterface)
+	}
+
+	if len(projects) == 1 {
+		d.ProjectID = projects[0]
+		project, _ := client.GetProject(ctx, d.ProjectID)
+		if project != nil {
+			log.Debugf("Auto-selected project '%s' (ID: %s)", project.Name, d.ProjectID)
+		} else {
+			log.Debugf("Auto-selected project ID: %s", d.ProjectID)
+		}
+		return nil
+	}
+
+	// Multiple projects exist, build a helpful error message
+	var projectNames []string
+	for _, projectID := range projects {
+		project, err := client.GetProject(ctx, projectID)
+		if err != nil {
+			projectNames = append(projectNames, projectID)
+		} else {
+			projectNames = append(projectNames, fmt.Sprintf("%s (%s)", project.Name, projectID))
 		}
 	}
-	return false
+
+	return fmt.Errorf("multiple Cloud projects found: %s. Please specify one using '--ovh-project'", strings.Join(projectNames, ", "))
 }
 
-// copied from openstack driver
-func sanitizeKeyPairName(s *string) {
-	*s = strings.Replace(*s, ".", "_", -1)
+// validateRegion validates the specified region exists.
+func (d *Driver) validateRegion(ctx context.Context, client *API) error {
+	log.Debug("Validating region")
+
+	regions, err := client.GetRegions(ctx, d.ProjectID)
+	if err != nil {
+		if containsIgnoreCase(fallbackRegions, d.RegionName) {
+			log.Warnf("Could not fetch regions from OVH API, accepting fallback region: %s", d.RegionName)
+			return nil
+		}
+		return fmt.Errorf("failed to validate region: %w", err)
+	}
+
+	if !containsIgnoreCase(regions, d.RegionName) {
+		return fmt.Errorf("invalid region '%s'. Available regions: %s. Visit: %s", d.RegionName, strings.Join(regions, ", "), CustomerInterface)
+	}
+
+	log.Debugf("Region validated: %s", d.RegionName)
+	return nil
 }
 
-// ensureSSHKey makes sure an SSH key for the machine exists with requested name
-func (d *Driver) ensureSSHKey() error {
+// validateFlavor validates the specified flavor exists and resolves its ID.
+func (d *Driver) validateFlavor(ctx context.Context, client *API) error {
+	log.Debug("Validating flavor")
+
+	flavor, err := client.GetFlavorByName(ctx, d.ProjectID, d.RegionName, d.FlavorName)
+	if err != nil {
+		if containsIgnoreCase(fallbackFlavors, d.FlavorName) {
+			log.Warnf("Could not resolve flavor via OVH API, using fallback value: %s", d.FlavorName)
+			d.FlavorID = d.FlavorName
+			return nil
+		}
+		return fmt.Errorf("failed to validate flavor: %w", err)
+	}
+
+	d.FlavorID = flavor.ID
+	log.Debugf("Flavor validated: %s (ID: %s, %d vCPUs, %dGB RAM)", flavor.Name, d.FlavorID, flavor.Vcpus, flavor.MemoryGB)
+	return nil
+}
+
+// validateImage validates the specified image exists and resolves its ID.
+func (d *Driver) validateImage(ctx context.Context, client *API) error {
+	log.Debug("Validating image")
+
+	image, err := client.GetImageByName(ctx, d.ProjectID, d.RegionName, d.ImageName)
+	if err != nil {
+		if containsIgnoreCase(fallbackImages, d.ImageName) {
+			log.Warnf("Could not resolve image via OVH API, using fallback value: %s", d.ImageName)
+			d.ImageID = d.ImageName
+			return nil
+		}
+		return fmt.Errorf("failed to validate image: %w", err)
+	}
+
+	d.ImageID = image.ID
+	log.Debugf("Image validated: %s (ID: %s, OS: %s)", image.Name, d.ImageID, image.OS)
+	return nil
+}
+
+// validateNetwork validates the private network if specified and configures network IDs.
+func (d *Driver) validateNetwork(ctx context.Context, client *API) error {
+	log.Debug("Validating network configuration")
+
+	if d.PrivateNetworkName == "" {
+		log.Debug("No private network specified, using public network only")
+		return nil
+	}
+
+	privateNetwork, err := client.GetPrivateNetworkByName(ctx, d.ProjectID, d.PrivateNetworkName)
+	if err != nil {
+		return fmt.Errorf("failed to find private network '%s': %w", d.PrivateNetworkName, err)
+	}
+
+	d.NetworkIDs = append(d.NetworkIDs, privateNetwork.ID)
+	log.Debugf("Private network validated: %s (ID: %s)", privateNetwork.Name, privateNetwork.ID)
+
+	// Add public network as well
+	publicNetworkID, err := client.GetPublicNetworkID(ctx, d.ProjectID)
+	if err != nil {
+		return fmt.Errorf("failed to get public network ID: %w", err)
+	}
+
+	d.NetworkIDs = append(d.NetworkIDs, publicNetworkID)
+	log.Debugf("Public network ID: %s", publicNetworkID)
+
+	return nil
+}
+
+// prepareSSHKey prepares the SSH key configuration.
+func (d *Driver) prepareSSHKey() error {
+	log.Debug("Preparing SSH key configuration")
+
+	// Use a common key or create a machine-specific one
+	if d.KeyPairName != "" {
+		keyPath := filepath.Join(d.StorePath, "sshkeys", d.KeyPairName)
+		if _, err := os.Stat(keyPath); err == nil {
+			d.SSHKeyPath = keyPath
+			log.Debugf("Using existing SSH key: %s", d.KeyPairName)
+		} else {
+			log.Debugf("SSH key '%s' not found locally, assuming it exists in OVH or ~/.ssh/", d.KeyPairName)
+		}
+	} else {
+		// Generate a unique key name for this machine
+		d.KeyPairName = fmt.Sprintf("%s-%s", d.MachineName, mcnutils.GenerateRandomID())
+		sanitizeKeyPairName(&d.KeyPairName)
+		d.SSHKeyPath = d.ResolveStorePath(d.KeyPairName)
+		log.Debugf("Will create SSH key: %s", d.KeyPairName)
+	}
+
+	return nil
+}
+
+// ensureSSHKey ensures an SSH key exists in OVH for the machine.
+func (d *Driver) ensureSSHKey(ctx context.Context) error {
 	client, err := d.getClient()
 	if err != nil {
 		return err
 	}
 
-	// Attempt to get an existing key
-	log.Debug("Checking Key Pair...", map[string]interface{}{"Name": d.KeyPairName})
-	sshKey, _ := client.GetSshkeyByName(d.ProjectID, d.RegionName, d.KeyPairName)
+	log.Debugf("Checking for existing SSH key: %s", d.KeyPairName)
+
+	// Try to find existing key
+	sshKey, _ := client.GetSshkeyByName(ctx, d.ProjectID, d.RegionName, d.KeyPairName)
 	if sshKey != nil {
 		d.KeyPairID = sshKey.ID
-		log.Debug("Found key id ", d.KeyPairID)
+		log.Debugf("Found existing SSH key (ID: %s)", d.KeyPairID)
 		return nil
 	}
 
-	// Generate key and parent dir if needed
-	log.Debug("Creating Key Pair...", map[string]interface{}{"Name": d.KeyPairName})
+	// Key doesn't exist, generate and upload it
+	log.Debugf("Creating new SSH key: %s", d.KeyPairName)
+
+	// Ensure key directory exists
 	keyfile := d.GetSSHKeyPath()
 	keypath := filepath.Dir(keyfile)
-	err = os.MkdirAll(keypath, 0700)
-	if err != nil {
-		return err
+	if err := os.MkdirAll(keypath, 0700); err != nil {
+		return fmt.Errorf("failed to create SSH key directory: %w", err)
 	}
 
-	err = ssh.GenerateSSHKey(d.GetSSHKeyPath())
-	if err != nil {
-		return err
+	// Generate SSH key pair
+	if err := ssh.GenerateSSHKey(d.GetSSHKeyPath()); err != nil {
+		return fmt.Errorf("failed to generate SSH key: %w", err)
 	}
+
+	// Read public key
 	publicKey, err := ioutil.ReadFile(d.publicSSHKeyPath())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read public SSH key: %w", err)
 	}
 
-	// Upload key
-	sshKey, err = client.CreateSshkey(d.ProjectID, d.KeyPairName, string(publicKey))
+	// Upload to OVH
+	sshKey, err = client.CreateSshkey(ctx, d.ProjectID, d.KeyPairName, string(publicKey))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to upload SSH key to OVH: %w", err)
 	}
-	d.KeyPairID = sshKey.ID
 
-	log.Debug("Created key id ", d.KeyPairID)
+	d.KeyPairID = sshKey.ID
+	log.Debugf("Created SSH key (ID: %s)", d.KeyPairID)
+
 	return nil
 }
 
-// waitForInstanceStatus waits until instance reaches status. Copied from openstack Driver
-func (d *Driver) waitForInstanceStatus(status string) (instance *Instance, err error) {
-	return instance, mcnutils.WaitForSpecificOrError(func() (bool, error) {
-		instance, err = d.client.GetInstance(d.ProjectID, d.InstanceID)
-		if err != nil {
-			return true, err
-		}
-		log.Debugf("Machine", map[string]interface{}{
-			"Name":  d.KeyPairName,
-			"State": instance.Status,
-		})
+// waitForInstanceStatus waits for the instance to reach the specified status.
+func (d *Driver) waitForInstanceStatus(ctx context.Context, targetStatus string) (*Instance, error) {
+	client, err := d.getClient()
+	if err != nil {
+		return nil, err
+	}
 
-		if instance.Status == "ERROR" {
-			return true, fmt.Errorf("Instance creation failed. Instance is in ERROR state")
-		}
+	log.Debugf("Waiting for instance to reach status: %s", targetStatus)
 
-		if instance.Status == status {
-			return true, nil
-		}
+	timeout := time.After(statusTimeout * time.Second)
+	ticker := time.NewTicker(statusCheckInterval)
+	defer ticker.Stop()
 
-		return false, nil
-	}, (statusTimeout / 4), 4*time.Second)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled while waiting for instance status: %w", ctx.Err())
+
+		case <-timeout:
+			return nil, fmt.Errorf("timeout waiting for instance to reach status '%s'", targetStatus)
+
+		case <-ticker.C:
+			instance, err := client.GetInstance(ctx, d.ProjectID, d.InstanceID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get instance status: %w", err)
+			}
+
+			log.Debugf("Instance status: %s (target: %s)", instance.Status, targetStatus)
+
+			if instance.Status == "ERROR" {
+				return nil, fmt.Errorf("instance entered ERROR state")
+			}
+
+			if instance.Status == targetStatus {
+				return instance, nil
+			}
+		}
+	}
 }
 
-// GetSSHHostname returns the hostname for SSH
-func (d *Driver) GetSSHHostname() (string, error) {
-	return d.IPAddress, nil
-}
-
-// GetSSHKeyPath returns the ssh key path
-func (d *Driver) GetSSHKeyPath() string {
-	return d.SSHKeyPath
-}
-
-// Create a new docker machine instance on OVH Cloud
+// Create creates a new OVH Cloud instance or MKS cluster.
 func (d *Driver) Create() error {
+	ctx := context.Background()
+
 	client, err := d.getClient()
 	if err != nil {
 		return err
 	}
 
 	if d.HostedMKS {
-		log.Debug("Creating OVH Managed Kubernetes (MKS) cluster...")
-		clusterReq := MKSClusterCreateReq{
-			Name:   d.MKSClusterName,
-			Region: d.RegionName,
-		}
-		if d.MKSVersion != "" {
-			clusterReq.Version = d.MKSVersion
-		}
-		cluster, err := client.CreateMKSCluster(d.ProjectID, clusterReq)
-		if err != nil {
-			return err
-		}
-		d.MKSClusterID = cluster.ID
-
-		nodePoolReq := MKSNodePoolCreateReq{
-			Name:         d.MKSNodePoolName,
-			FlavorName:   d.MKSNodePoolFlavor,
-			DesiredNodes: d.MKSNodePoolDesiredSize,
-		}
-		nodePool, err := client.CreateMKSNodePool(d.ProjectID, d.MKSClusterID, nodePoolReq)
-		if err != nil {
-			return err
-		}
-		d.MKSNodePoolID = nodePool.ID
-		log.Infof("Created OVH MKS cluster %s with nodepool %s", d.MKSClusterID, d.MKSNodePoolID)
-		return nil
+		return d.createMKSCluster(ctx, client)
 	}
 
-	// Ensure ssh key
-	err = d.ensureSSHKey()
+	return d.createInstance(ctx, client)
+}
+
+// createMKSCluster creates an OVH Managed Kubernetes cluster.
+func (d *Driver) createMKSCluster(ctx context.Context, client *API) error {
+	log.Infof("Creating OVH Managed Kubernetes cluster: %s", d.MKSClusterName)
+
+	clusterReq := MKSClusterCreateReq{
+		Name:   d.MKSClusterName,
+		Region: d.RegionName,
+	}
+	if d.MKSVersion != "" {
+		clusterReq.Version = d.MKSVersion
+	}
+
+	cluster, err := client.CreateMKSCluster(ctx, d.ProjectID, clusterReq)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create MKS cluster: %w", err)
+	}
+
+	d.MKSClusterID = cluster.ID
+	log.Infof("Created MKS cluster (ID: %s)", d.MKSClusterID)
+
+	// Create node pool
+	log.Infof("Creating node pool: %s", d.MKSNodePoolName)
+
+	nodePoolReq := MKSNodePoolCreateReq{
+		Name:         d.MKSNodePoolName,
+		FlavorName:   d.MKSNodePoolFlavor,
+		DesiredNodes: d.MKSNodePoolDesiredSize,
+	}
+
+	nodePool, err := client.CreateMKSNodePool(ctx, d.ProjectID, d.MKSClusterID, nodePoolReq)
+	if err != nil {
+		// Cleanup cluster on node pool creation failure
+		log.Warnf("Failed to create node pool, cleaning up cluster...")
+		_ = client.DeleteMKSCluster(ctx, d.ProjectID, d.MKSClusterID)
+		return fmt.Errorf("failed to create MKS node pool: %w", err)
+	}
+
+	d.MKSNodePoolID = nodePool.ID
+	log.Infof("Created MKS cluster '%s' (ID: %s) with node pool '%s' (ID: %s)",
+		d.MKSClusterName, d.MKSClusterID, d.MKSNodePoolName, d.MKSNodePoolID)
+
+	return nil
+}
+
+// createInstance creates a standard OVH Cloud instance.
+func (d *Driver) createInstance(ctx context.Context, client *API) error {
+	// Ensure SSH key exists
+	if err := d.ensureSSHKey(ctx); err != nil {
+		return fmt.Errorf("failed to ensure SSH key: %w", err)
 	}
 
 	// Create instance
-	log.Debug("Creating OVH instance...")
+	log.Infof("Creating OVH Cloud instance: %s", d.MachineName)
+	log.Debugf("  Region: %s", d.RegionName)
+	log.Debugf("  Flavor: %s (ID: %s)", d.FlavorName, d.FlavorID)
+	log.Debugf("  Image: %s (ID: %s)", d.ImageName, d.ImageID)
+	log.Debugf("  Billing: %s", d.BillingPeriod)
+
 	monthlyBilling := d.BillingPeriod == "monthly"
+
 	instance, err := client.CreateInstance(
+		ctx,
 		d.ProjectID,
 		d.MachineName,
 		d.KeyPairID,
@@ -521,18 +666,24 @@ func (d *Driver) Create() error {
 		monthlyBilling,
 	)
 	if err != nil {
-		return err
+		// Cleanup SSH key if we created it
+		d.cleanupSSHKey(ctx, client)
+		return fmt.Errorf("failed to create instance: %w", err)
 	}
+
 	d.InstanceID = instance.ID
+	log.Infof("Instance created (ID: %s)", d.InstanceID)
 
-	// Wait until instance is ACTIVE
-	log.Debugf("Waiting for OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
-	instance, err = d.waitForInstanceStatus("ACTIVE")
+	// Wait for instance to become active
+	log.Info("Waiting for instance to become active...")
+	instance, err = d.waitForInstanceStatus(ctx, "ACTIVE")
 	if err != nil {
+		// Cleanup on failure
+		d.cleanupInstance(ctx, client)
 		return err
 	}
 
-	// Save Ip address
+	// Extract IP address
 	d.IPAddress = ""
 	for _, ip := range instance.IPAddresses {
 		if ip.Type == "public" {
@@ -542,89 +693,282 @@ func (d *Driver) Create() error {
 	}
 
 	if d.IPAddress == "" {
-		return fmt.Errorf("No IP found for instance %s", instance.ID)
+		d.cleanupInstance(ctx, client)
+		return fmt.Errorf("no public IP address found for instance")
 	}
 
-	log.Debugf("IP address found", map[string]interface{}{
-		"MachineID": d.InstanceID,
-		"IP":        d.IPAddress,
-	})
+	log.Infof("Instance is active. IP address: %s", d.IPAddress)
 
-	// All done !
 	return nil
 }
 
-func (d *Driver) publicSSHKeyPath() string {
-	return d.GetSSHKeyPath() + ".pub"
+// cleanupSSHKey removes the SSH key if we created it (for cleanup on failure).
+func (d *Driver) cleanupSSHKey(ctx context.Context, client *API) {
+	if d.KeyPairID != "" && strings.HasPrefix(d.KeyPairName, d.MachineName) {
+		log.Debugf("Cleaning up SSH key (ID: %s)", d.KeyPairID)
+		_ = client.DeleteSshkey(ctx, d.ProjectID, d.KeyPairID)
+	}
 }
 
-// GetState return instance status
+// cleanupInstance removes the instance and SSH key (for cleanup on failure).
+func (d *Driver) cleanupInstance(ctx context.Context, client *API) {
+	if d.InstanceID != "" {
+		log.Debugf("Cleaning up instance (ID: %s)", d.InstanceID)
+		_ = client.DeleteInstance(ctx, d.ProjectID, d.InstanceID)
+	}
+	d.cleanupSSHKey(ctx, client)
+}
+
+// GetState returns the current state of the instance or MKS cluster.
 func (d *Driver) GetState() (state.State, error) {
+	ctx := context.Background()
+
 	client, err := d.getClient()
 	if err != nil {
 		return state.None, err
 	}
 
 	if d.HostedMKS {
-		if d.MKSClusterID == "" {
-			return state.None, nil
-		}
-
-		cluster, err := client.GetMKSCluster(d.ProjectID, d.MKSClusterID)
-		if err != nil {
-			return state.None, err
-		}
-
-		log.Debugf("OVH MKS cluster", map[string]interface{}{
-			"ClusterID": d.MKSClusterID,
-			"State":     cluster.Status,
-		})
-
-		switch cluster.Status {
-		case "READY":
-			return state.Running, nil
-		case "CREATING", "UPDATING":
-			return state.Starting, nil
-		case "DELETING":
-			return state.Stopping, nil
-		case "ERROR":
-			return state.Error, nil
-		default:
-			return state.None, nil
-		}
+		return d.getMKSState(ctx, client)
 	}
 
-	log.Debugf("Get status for OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
+	return d.getInstanceState(ctx, client)
+}
 
-	instance, err := client.GetInstance(d.ProjectID, d.InstanceID)
+// getMKSState returns the state of an MKS cluster.
+func (d *Driver) getMKSState(ctx context.Context, client *API) (state.State, error) {
+	if d.MKSClusterID == "" {
+		return state.None, nil
+	}
+
+	// List all clusters and find ours
+	clusters, err := client.ListMKSClusters(ctx, d.ProjectID)
 	if err != nil {
-		return state.None, err
+		return state.None, fmt.Errorf("failed to list MKS clusters: %w", err)
 	}
 
-	log.Debugf("OVH instance", map[string]interface{}{
-		"MachineID": d.InstanceID,
-		"State":     instance.Status,
-	})
+	// Find our cluster by ID
+	for _, cluster := range clusters {
+		if cluster.ID == d.MKSClusterID {
+			log.Debugf("MKS cluster status: %s", cluster.Status)
+
+			switch cluster.Status {
+			case "READY":
+				return state.Running, nil
+			case "CREATING", "UPDATING":
+				return state.Starting, nil
+			case "DELETING":
+				return state.Stopping, nil
+			case "ERROR":
+				return state.Error, nil
+			default:
+				return state.None, nil
+			}
+		}
+	}
+
+	// Cluster not found
+	return state.None, nil
+}
+
+// getInstanceState returns the state of a standard instance.
+func (d *Driver) getInstanceState(ctx context.Context, client *API) (state.State, error) {
+	if d.InstanceID == "" {
+		return state.None, nil
+	}
+
+	instance, err := client.GetInstance(ctx, d.ProjectID, d.InstanceID)
+	if err != nil {
+		return state.None, fmt.Errorf("failed to get instance state: %w", err)
+	}
+
+	log.Debugf("Instance status: %s", instance.Status)
 
 	switch instance.Status {
 	case "ACTIVE":
 		return state.Running, nil
+	case "BUILD", "BUILDING":
+		return state.Starting, nil
+	case "SHUTOFF", "STOPPED":
+		return state.Stopped, nil
 	case "PAUSED":
 		return state.Paused, nil
 	case "SUSPENDED":
 		return state.Saved, nil
-	case "SHUTOFF":
-		return state.Stopped, nil
-	case "BUILDING":
-		return state.Starting, nil
 	case "ERROR":
 		return state.Error, nil
+	case "DELETED", "SOFT_DELETED":
+		return state.None, nil
+	default:
+		return state.None, nil
 	}
-
-	return state.None, nil
 }
 
-// GetURL returns docker daemon URL on this machine
+// Start starts a stopped instance.
+func (d *Driver) Start() error {
+	ctx := context.Background()
+
+	if d.HostedMKS {
+		return fmt.Errorf("start is not supported for MKS clusters")
+	}
+
+	client, err := d.getClient()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Starting instance (ID: %s)", d.InstanceID)
+
+	if err := client.StartInstance(ctx, d.ProjectID, d.InstanceID); err != nil {
+		return fmt.Errorf("failed to start instance: %w", err)
+	}
+
+	// Wait for instance to become active
+	if _, err := d.waitForInstanceStatus(ctx, "ACTIVE"); err != nil {
+		return err
+	}
+
+	log.Info("Instance started successfully")
+	return nil
+}
+
+// Stop stops a running instance.
+func (d *Driver) Stop() error {
+	ctx := context.Background()
+
+	if d.HostedMKS {
+		return fmt.Errorf("stop is not supported for MKS clusters")
+	}
+
+	client, err := d.getClient()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Stopping instance (ID: %s)", d.InstanceID)
+
+	if err := client.StopInstance(ctx, d.ProjectID, d.InstanceID); err != nil {
+		return fmt.Errorf("failed to stop instance: %w", err)
+	}
+
+	// Wait for instance to shut off
+	if _, err := d.waitForInstanceStatus(ctx, "SHUTOFF"); err != nil {
+		return err
+	}
+
+	log.Info("Instance stopped successfully")
+	return nil
+}
+
+// Restart reboots a running instance.
+func (d *Driver) Restart() error {
+	ctx := context.Background()
+
+	if d.HostedMKS {
+		return fmt.Errorf("restart is not supported for MKS clusters")
+	}
+
+	client, err := d.getClient()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Restarting instance (ID: %s)", d.InstanceID)
+
+	if err := client.RebootInstance(ctx, d.ProjectID, d.InstanceID, false); err != nil {
+		return fmt.Errorf("failed to restart instance: %w", err)
+	}
+
+	// Wait for instance to become active again
+	if _, err := d.waitForInstanceStatus(ctx, "ACTIVE"); err != nil {
+		return err
+	}
+
+	log.Info("Instance restarted successfully")
+	return nil
+}
+
+// Kill force-stops an instance (hard reboot).
+func (d *Driver) Kill() error {
+	if d.HostedMKS {
+		return fmt.Errorf("kill is not supported for MKS clusters")
+	}
+
+	client, err := d.getClient()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Force-stopping instance (ID: %s)", d.InstanceID)
+
+	if err := client.RebootInstance(context.Background(), d.ProjectID, d.InstanceID, true); err != nil {
+		return fmt.Errorf("failed to force-stop instance: %w", err)
+	}
+
+	log.Info("Instance force-stopped")
+	return nil
+}
+
+// Remove deletes the instance or MKS cluster and associated resources.
+func (d *Driver) Remove() error {
+	ctx := context.Background()
+
+	client, err := d.getClient()
+	if err != nil {
+		return err
+	}
+
+	if d.HostedMKS {
+		return d.removeMKSCluster(ctx, client)
+	}
+
+	return d.removeInstance(ctx, client)
+}
+
+// removeMKSCluster deletes an MKS cluster.
+func (d *Driver) removeMKSCluster(ctx context.Context, client *API) error {
+	if d.MKSClusterID == "" {
+		log.Info("No MKS cluster to remove")
+		return nil
+	}
+
+	log.Infof("Deleting MKS cluster (ID: %s)", d.MKSClusterID)
+
+	if err := client.DeleteMKSCluster(ctx, d.ProjectID, d.MKSClusterID); err != nil {
+		return fmt.Errorf("failed to delete MKS cluster: %w", err)
+	}
+
+	log.Info("MKS cluster deleted successfully")
+	return nil
+}
+
+// removeInstance deletes a standard instance and its SSH key.
+func (d *Driver) removeInstance(ctx context.Context, client *API) error {
+	// Delete instance
+	if d.InstanceID != "" {
+		log.Infof("Deleting instance (ID: %s)", d.InstanceID)
+		if err := client.DeleteInstance(ctx, d.ProjectID, d.InstanceID); err != nil {
+			return fmt.Errorf("failed to delete instance: %w", err)
+		}
+		log.Info("Instance deleted successfully")
+	}
+
+	// Delete SSH key if we created it
+	if d.KeyPairID != "" && strings.HasPrefix(d.KeyPairName, d.MachineName) {
+		log.Debugf("Deleting SSH key (ID: %s)", d.KeyPairID)
+		if err := client.DeleteSshkey(ctx, d.ProjectID, d.KeyPairID); err != nil {
+			log.Warnf("Failed to delete SSH key: %v", err)
+		} else {
+			log.Debug("SSH key deleted successfully")
+		}
+	} else {
+		log.Debugf("Keeping SSH key '%s' (not machine-specific)", d.KeyPairName)
+	}
+
+	return nil
+}
+
+// GetURL returns the Docker daemon URL for this machine.
 func (d *Driver) GetURL() (string, error) {
 	if d.IPAddress == "" {
 		return "", nil
@@ -632,142 +976,60 @@ func (d *Driver) GetURL() (string, error) {
 	return fmt.Sprintf("tcp://%s", net.JoinHostPort(d.IPAddress, "2376")), nil
 }
 
-// Remove deletes a machine and it's SSH keys from OVH Cloud
-func (d *Driver) Remove() error {
-	log.Debugf("deleting instance...", map[string]interface{}{"MachineID": d.InstanceID})
-	log.Info("Deleting OVH instance...")
-
-	client, err := d.getClient()
-	if err != nil {
-		return err
-	}
-
-	if d.HostedMKS {
-		if d.MKSClusterID != "" {
-			log.Debugf("deleting MKS cluster...", map[string]interface{}{"ClusterID": d.MKSClusterID})
-			if err = client.DeleteMKSCluster(d.ProjectID, d.MKSClusterID); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	// Deletes instance, if we created it
-	if d.InstanceID != "" {
-		err = client.DeleteInstance(d.ProjectID, d.InstanceID)
-		if err != nil {
-			return err
-		}
-	}
-
-	// If key name  does not starts with the machine ID, this is a pre-existing key, keep it
-	if !strings.HasPrefix(d.KeyPairName, d.MachineName) {
-		log.Debugf("keeping key pair...", map[string]interface{}{"KeyPairID": d.KeyPairID})
-		return nil
-	}
-
-	// Deletes ssh key, if we created it
-	if d.KeyPairID != "" {
-		log.Debugf("deleting key pair...", map[string]interface{}{"KeyPairID": d.KeyPairID})
-		err = client.DeleteSshkey(d.ProjectID, d.KeyPairID)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+// GetSSHHostname returns the hostname for SSH connections.
+func (d *Driver) GetSSHHostname() (string, error) {
+	return d.IPAddress, nil
 }
 
-// Restart this docker-machine
-func (d *Driver) Restart() error {
-	if d.HostedMKS {
-		return fmt.Errorf("restart is not supported in hosted MKS mode")
-	}
-
-	log.Debugf("Restarting OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
-
-	client, err := d.getClient()
-	if err != nil {
-		return err
-	}
-
-	err = client.RebootInstance(d.ProjectID, d.InstanceID, false)
-	if err != nil {
-		return err
-	}
-
-	_, err = d.waitForInstanceStatus("ACTIVE")
-	return err
+// GetSSHKeyPath returns the path to the SSH private key.
+func (d *Driver) GetSSHKeyPath() string {
+	return d.SSHKeyPath
 }
 
-//
-// STUBS
-//
-
-// Kill (STUB) kill machine
-func (d *Driver) Kill() (err error) {
-	return fmt.Errorf("Killing machines is not possible on OVH Cloud")
-}
-
-// Start starts a stopped machine
-func (d *Driver) Start() (err error) {
-	if d.HostedMKS {
-		return fmt.Errorf("start is not supported in hosted MKS mode")
-	}
-
-	log.Debugf("Starting OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
-
-	client, err := d.getClient()
-	if err != nil {
-		return err
-	}
-
-	if err = client.StartInstance(d.ProjectID, d.InstanceID); err != nil {
-		return err
-	}
-
-	_, err = d.waitForInstanceStatus("ACTIVE")
-	return err
-}
-
-// Stop stops a running machine
-func (d *Driver) Stop() (err error) {
-	if d.HostedMKS {
-		return fmt.Errorf("stop is not supported in hosted MKS mode")
-	}
-
-	log.Debugf("Stopping OVH instance...", map[string]interface{}{"MachineID": d.InstanceID})
-
-	client, err := d.getClient()
-	if err != nil {
-		return err
-	}
-
-	if err = client.StopInstance(d.ProjectID, d.InstanceID); err != nil {
-		return err
-	}
-
-	_, err = d.waitForInstanceStatus("SHUTOFF")
-	return err
+// publicSSHKeyPath returns the path to the SSH public key.
+func (d *Driver) publicSSHKeyPath() string {
+	return d.GetSSHKeyPath() + ".pub"
 }
 
 // ListHostedMKSClusters is a helper for hosted MKS mode.
 func (d *Driver) ListHostedMKSClusters() (MKSClusters, error) {
+	ctx := context.Background()
 	client, err := d.getClient()
 	if err != nil {
 		return nil, err
 	}
-	return client.ListMKSClusters(d.ProjectID)
+	return client.ListMKSClusters(ctx, d.ProjectID)
 }
 
 // ScaleHostedMKSNodePool is a helper for hosted MKS mode.
 func (d *Driver) ScaleHostedMKSNodePool(desiredNodes int) error {
 	if d.MKSClusterID == "" || d.MKSNodePoolID == "" {
-		return fmt.Errorf("MKS cluster/nodepool IDs are required before scaling")
+		return fmt.Errorf("MKS cluster and node pool IDs are required for scaling")
 	}
+
+	ctx := context.Background()
 	client, err := d.getClient()
 	if err != nil {
 		return err
 	}
-	return client.ScaleMKSNodePool(d.ProjectID, d.MKSClusterID, d.MKSNodePoolID, desiredNodes)
+
+	log.Infof("Scaling MKS node pool to %d nodes", desiredNodes)
+	return client.ScaleMKSNodePool(ctx, d.ProjectID, d.MKSClusterID, d.MKSNodePoolID, desiredNodes)
+}
+
+// Helper functions
+
+// containsIgnoreCase checks if a slice contains a string (case-insensitive).
+func containsIgnoreCase(items []string, value string) bool {
+	for _, item := range items {
+		if strings.EqualFold(item, value) {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizeKeyPairName sanitizes a key pair name for OVH.
+func sanitizeKeyPairName(s *string) {
+	*s = strings.Replace(*s, ".", "_", -1)
 }

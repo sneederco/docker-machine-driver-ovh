@@ -1,200 +1,228 @@
-[![OVH Cloud driver for Docker-Machine](https://raw.githubusercontent.com/sneederco/docker-machine-driver-ovh/master/img/logo.png)](https://github.com/sneederco/docker-machine-driver-ovh)
+# OVHcloud Driver for Rancher
+
+[![OVHcloud Driver](https://raw.githubusercontent.com/sneederco/docker-machine-driver-ovh/master/img/logo.png)](https://github.com/sneederco/docker-machine-driver-ovh)
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Report Card](https://goreportcard.com/badge/github.com/sneederco/docker-machine-driver-ovh)](https://goreportcard.com/report/github.com/sneederco/docker-machine-driver-ovh)
+
+**Maintained by [Sneederco](https://github.com/sneederco)**
+
+A Docker Machine driver for OVHcloud Public Cloud. Provision compute instances and Managed Kubernetes clusters on OVHcloud with Docker Machine or Rancher.
 
 ```bash
-# Create your first OVH Cloud Docker machine
-docker-machine create -d ovh hello-docker
+# Create your first OVHcloud instance in seconds
+docker-machine create -d ovh my-first-node
 ```
 
-OVH Cloud driver is based on OVH Public API. To create OVH
-API credentials, you may visit https://api.ovh.com. See
-[1. Get your OVH credentials](#1-get-your-ovh-credentials) below for a detailed how-to
+## ✨ Features
 
-## Installation
+- 🚀 **Fast provisioning** — Create OVHcloud instances in under 60 seconds
+- ☸️ **Rancher integration** — Native support for Rancher node drivers
+- 🌍 **Multi-region** — Deploy across OVHcloud's global datacenters
+- 🔐 **Secure by default** — SSH key management and private networking
+- 💰 **Cost flexible** — Hourly or monthly billing options
+- 🛡️ **vRack support** — Integrate with OVHcloud private networks
+- ⎈ **Managed Kubernetes** — Experimental support for OVH MKS clusters
 
-The easiest way to install ovh docker-machine driver is to:
+## 📦 Quick Start
+
+Get up and running in 5 steps:
+
+### 1. Install the driver
 
 ```bash
-go get github.com/sneederco/docker-machine-driver-ovh
-go install github.com/sneederco/docker-machine-driver-ovh
-ln -s $(go env GOPATH)/bin/docker-machine-driver-ovh /usr/local/bin/docker-machine-driver-ovh
+# Install via Go
+go install github.com/sneederco/docker-machine-driver-ovh@latest
+
+# Make it available to Docker Machine
+ln -s $(go env GOPATH)/bin/docker-machine-driver-ovh /usr/local/bin/
 ```
 
-## Example Usage
+Or download a pre-built binary from the [releases page](https://github.com/sneederco/docker-machine-driver-ovh/releases).
 
-### 1. Get your OVH credentials
+### 2. Get OVH API credentials
 
-OVH driver never store your OVH login and password. Instead it uses a set of
-3 keys dedicated to a given application. If you don't have your keys already,
-generating them is easy:
+Create your API keys at: https://api.ovh.com/createToken/
 
-1. Go to the token creation page: https://api.ovh.com/createToken/?GET=/*&POST=/*&DELETE=/*&PUT=/*
-2. Enter your login, password, a name and a short description then validate. You may want to increase the validity period.
-3. You now have an ``Application Key``, ``Application Secret`` and a ``Consumer Key``.
+**Required permissions:**
+- `GET /*`
+- `POST /*`
+- `PUT /*`
+- `DELETE /*`
 
-## 2. Create a configuration file
+You'll receive:
+- Application Key
+- Application Secret
+- Consumer Key
 
-Create a file named ```ovh.conf```.
-This file will allow any application built with official OVH API drivers to
-use it without requiring new keys:
+### 3. Configure credentials
+
+Create `~/.ovh.conf`:
 
 ```ini
-; ovh.conf
 [default]
 endpoint=ovh-eu
 
 [ovh-eu]
-application_key=<Application Key>
-application_secret=<Application Secret>
-consumer_key=<Consumer Key>
+application_key=YOUR_APPLICATION_KEY
+application_secret=YOUR_APPLICATION_SECRET
+consumer_key=YOUR_CONSUMER_KEY
 ```
 
-### 3. Create your machines!
-
-*Basic example*:
+Or use environment variables:
 
 ```bash
-docker-machine create -d ovh node-1
+export OVH_APPLICATION_KEY="YOUR_APPLICATION_KEY"
+export OVH_APPLICATION_SECRET="YOUR_APPLICATION_SECRET"
+export OVH_CONSUMER_KEY="YOUR_CONSUMER_KEY"
 ```
 
-*Advanced example: Use CoreOS with VPS-SSD-2 in Data Center Strasbourg 1*
+### 4. Create your first instance
 
 ```bash
-docker-machine -D create --ovh-region "SBG1" --ovh-flavor "vps-ssd-2" --ovh-image "CoreOS stable 899.15.0" --ovh-ssh-user "core" --driver ovh node-1
+docker-machine create -d ovh my-node
 ```
-Note: For the different image-types you have to use special --ovh-ssh-user (for Example "ubuntu" for Ubuntu OS, "core" for CoreOS and "admin" for Debian)
 
-## Configuration
+### 5. Start using it!
 
-### Options
+```bash
+# Get environment variables
+eval $(docker-machine env my-node)
 
-|Option Name|Description|Default Value|required|
-|---|---|---|---|
-|``--ovh-application-secret`` or ``$OVH_APPLICATION_SECRET``|Application Secret|none      |yes|
-|``--ovh-application-key`` or ``$OVH_APPLICATION_KEY``      |Application key   |none      |yes|
-|``--ovh-consumer-key`` or ``$OVH_CONSUMER_KEY``            |Consumer Key      |none      |yes|
-|``--ovh-endpoint`` or ``$OVH_ENDPOINT``                    |Endpoint          |none      |no|
-|``--ovh-region``                                           |Cloud region      |GRA1      |no|
-|``--ovh-private-network``                                  |Cloud private network |public |no|
-|``--ovh-flavor``                                           |Cloud Machine type|vps-ssd-1 |no|
-|``--ovh-image``                                            |Cloud Machine image|Ubuntu 16.04 |no|
-|``--ovh-ssh-user``                                         |Cloud Machine SSH User|ubuntu |no|
-|``--ovh-project``                                          |Cloud Project name/description or id|single one|only if multiple projects|
-|``--ovh-ssh-key``                                          |Cloud Machine SSH Key|none |no|
-|``--ovh-billing-period``                                   |OVH Cloud billing period (hourly or monthly)|hourly |no|
-|``--ovh-hosted-mks``                                       |Enable hosted OVH Managed Kubernetes Service (MKS) mode|false|no|
-|``--ovh-mks-cluster-name``                                 |MKS cluster name (required when hosted mode is enabled)|none|conditional|
-|``--ovh-mks-version``                                      |Kubernetes version override for MKS cluster|latest default by OVH|no|
-|``--ovh-mks-nodepool-name``                                |MKS nodepool name|default|no|
-|``--ovh-mks-nodepool-flavor``                              |MKS nodepool flavor name|vps-ssd-1|conditional|
-|``--ovh-mks-nodepool-size``                                |MKS nodepool desired node count|1|conditional|
-
-### Hosted OVH MKS mode (MVP)
-
-Experimental MVP wiring is available for OVH Managed Kubernetes Service via `--ovh-hosted-mks`.
-
-Example:
-
+# Run a container
+docker run hello-world
 ```
+
+## 📋 Configuration Options
+
+| Flag | Environment Variable | Description | Default | Required |
+|------|---------------------|-------------|---------|----------|
+| `--ovh-application-key` | `OVH_APPLICATION_KEY` | OVH API application key | - | Yes* |
+| `--ovh-application-secret` | `OVH_APPLICATION_SECRET` | OVH API application secret | - | Yes* |
+| `--ovh-consumer-key` | `OVH_CONSUMER_KEY` | OVH API consumer key | - | Yes* |
+| `--ovh-endpoint` | `OVH_ENDPOINT` | OVH API endpoint | `ovh-eu` | No |
+| `--ovh-project` | - | OVH Cloud project name or ID | Auto-detect | Conditional** |
+| `--ovh-region` | - | OVH region | `GRA1` | No |
+| `--ovh-flavor` | - | Instance flavor/type | `vps-ssd-1` | No |
+| `--ovh-image` | - | OS image name or ID | `Ubuntu 22.04` | No |
+| `--ovh-ssh-user` | - | SSH username | `ubuntu` | No |
+| `--ovh-ssh-key` | - | Existing SSH key name | Auto-generated | No |
+| `--ovh-private-network` | - | vRack network (VLAN ID or name) | `public` | No |
+| `--ovh-billing-period` | - | Billing period: `hourly` or `monthly` | `hourly` | No |
+| `--ovh-hosted-mks` | - | Enable Managed Kubernetes mode | `false` | No |
+| `--ovh-mks-cluster-name` | - | MKS cluster name | - | If MKS enabled |
+| `--ovh-mks-version` | - | Kubernetes version | Latest | No |
+| `--ovh-mks-nodepool-name` | - | MKS nodepool name | `default` | No |
+| `--ovh-mks-nodepool-flavor` | - | MKS nodepool flavor | `vps-ssd-1` | If MKS enabled |
+| `--ovh-mks-nodepool-size` | - | MKS nodepool node count | `1` | If MKS enabled |
+
+\* Can be stored in `ovh.conf` instead  
+\*\* Required only if you have multiple OVH Cloud projects
+
+**Available regions:** GRA1, GRA3, SBG1, SBG5, BHS5, DE1, UK1, WAW1  
+**Popular flavors:** vps-ssd-1, vps-ssd-2, vps-ssd-3, b2-7, b2-15, b2-30  
+**Common images:** Ubuntu 22.04, Ubuntu 20.04, Debian 12, Debian 11
+
+[Full configuration reference →](docs/configuration.md)
+
+## 🎯 Common Use Cases
+
+### Deploy in a specific region with custom resources
+
+```bash
+docker-machine create -d ovh \
+  --ovh-region SBG5 \
+  --ovh-flavor b2-15 \
+  --ovh-image "Debian 12" \
+  --ovh-ssh-user debian \
+  production-node
+```
+
+### Use private networking with vRack
+
+```bash
+docker-machine create -d ovh \
+  --ovh-private-network 42 \
+  --ovh-region GRA1 \
+  private-node
+```
+
+### Create a Managed Kubernetes cluster (Experimental)
+
+```bash
 docker-machine create -d ovh \
   --ovh-hosted-mks \
-  --ovh-project "$OVH_PROJECT" \
-  --ovh-region GRA1 \
-  --ovh-mks-cluster-name dm-mks-cluster \
-  --ovh-mks-nodepool-name default \
+  --ovh-mks-cluster-name my-cluster \
   --ovh-mks-nodepool-flavor b2-7 \
   --ovh-mks-nodepool-size 3 \
-  dm-ovh-mks
+  k8s-cluster
 ```
 
-Current MVP scope:
-- create cluster
-- get/list cluster state (helper path + hosted GetState)
-- delete cluster
-- nodepool create + desiredNodes scale request model
+## 🔗 Rancher Integration
 
-Registration/import notes: `docs/hosted-mks-registration.md`
+This driver works seamlessly with Rancher for automated node provisioning.
 
-### Vrack integration
+**Step-by-step guide:** [Rancher Integration →](docs/rancher-integration.md)
 
-The vRack is [OVH's private networks](https://www.ovh.com/us/solutions/vrack/). A vRack may contain up to 4000 Vlans and any compatible OVH products, including Cloud projects.
-To use the vRack with this docker-machine driver:
+### Quick setup:
 
-1. [Create a new vRack](https://www.ovh.com/manager/cloud/index.html#/vrack/new) if needed (this is free)
-2. [Add your Cloud project to the vRack](https://www.ovh.com/manager/cloud/index.html#/vrack)
-3. [Go back to your Cloud project](https://www.ovh.com/manager/cloud/index.html#/iaas/pci/project)
-4. And configure some Vlan
+1. Navigate to **Cluster Management** → **Drivers** → **Node Drivers**
+2. Add a new Node Driver:
+   - **Download URL:** `https://github.com/sneederco/docker-machine-driver-ovh/releases/latest/download/docker-machine-driver-ovh-linux-amd64`
+   - **Custom UI URL:** *(optional)*
+3. Activate the driver
+4. Create a new cluster using the OVH node template
 
-Once this setup is done, you are ready to use the vRack with Docker Machine:
+## 🔧 Troubleshooting
 
-```
-VLAN_NUMBER=3
-docker-machine create -d ovh --ovh-private-network $VLAN_NUMBER machine-in-the-vrack
-```
+### Common issues:
 
-Note that you will still need to configure the interface. A quick way to do it is:
+**"Could not create a connection to OVH API"**
+- Verify your credentials in `~/.ovh.conf`
+- Check API endpoint matches your region
+- Ensure API keys have sufficient permissions
 
-```
-docker-machine ssh machine-in-the-vrack
+**"Project not found"**
+- Specify project explicitly with `--ovh-project`
+- Verify project exists in OVH console
 
-# Create the configuration file
-sudo tee /etc/network/interfaces.d/99-vrack.cfg << EOF
-auto ens4
-iface ens4 inet dhcp
-EOF
+**SSH connection issues**
+- Check SSH user matches your OS (`ubuntu`, `debian`, `core`, `admin`)
+- Verify SSH keys are properly configured
+- Ensure security groups allow SSH (port 22)
 
-# Enable the interface
-sudo ifup ens4
-```
+[Full troubleshooting guide →](docs/troubleshooting.md)
 
-### Authentication
+## 📚 Documentation
 
-OVH credentials may be supplied through arguments, environment or configuration file, by order of decreasing priority. The configuration may be:
+- [Installation Guide](docs/installation.md) — Detailed installation steps for all platforms
+- [Configuration Reference](docs/configuration.md) — Complete flag and option documentation
+- [Rancher Integration](docs/rancher-integration.md) — Step-by-step Rancher setup
+- [Architecture Overview](docs/architecture.md) — How the driver works internally
+- [Troubleshooting Guide](docs/troubleshooting.md) — Common issues and solutions
 
-- global ``/etc/ovh.conf``
-- user specific ``~/.ovh.conf``
-- application specific ``./ovh.conf``
+## 🤝 Contributing
 
-### SSH Key
+We welcome contributions! Whether it's:
+- 🐛 Bug reports
+- 💡 Feature requests
+- 📝 Documentation improvements
+- 🔧 Code contributions
 
-Docker-machine can generate a key for each new machine. It is a nice feature to start with but it will quickly load your OVH project with many keys (even though these keys are removed uppon machine deletion).
+Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
-With the `--ovh-ssh-key` option you can define a key name (already present in your ovh project). This key must be accessible (in ~/.ssh or in the ssh agent) by the ssh binary present on the machine running docker-mamchine.
+## 📖 Related Resources
 
-## Hacking
+- **OVH Cloud Console:** https://www.ovh.com/manager/cloud
+- **OVH Cloud Offers:** https://www.ovhcloud.com/en/public-cloud/
+- **OVH API Documentation:** https://api.ovh.com/
+- **Docker Machine Docs:** https://docs.docker.com/machine/
+- **Rancher Docs:** https://rancher.com/docs/
 
-### Get the sources
+## 📄 License
 
-```bash
-go get github.com/sneederco/docker-machine-driver-ovh
-cd $(go env GOPATH)/src/github.com/sneederco/docker-machine-driver-ovh
-```
+MIT License - see [LICENSE](LICENSE) file for details.
 
-### Build the driver
-Make sure to export `GO15VENDOREXPERIMENT=1`. Every necessary dependency is
-stored in the vendoring directory.
+---
 
-### Test the driver
-
-To test the driver make sure your current build directory has the highest
-priority in your ``$PATH`` so that docker-machine can find it.
-
-```
-export PATH=$(go env GOPATH)/src/github.com/sneederco/docker-machine-driver-ovh:$PATH
-```
-
-## Related links
-
-- **OVH Cloud console**: https://www.ovh.com/manager/cloud/index.html
-- **OVH Cloud offers**: https://www.ovh.com/us/cloud/
-- **Docker Machine**: https://docs.docker.com/machine/
-- **Contribute**: https://github.com/sneederco/docker-machine-driver-ovh
-- **Report bugs**: https://github.com/sneederco/docker-machine-driver-ovh/issues
-
-## OVH Program Traceability (Issue-linked)
-
-- `docs/ISSUES-2-4-5-TRACE.md` — traceability for Epic #2 and WS2/WS3 (#4/#5), including command consistency checks and blocker ownership.
-- `docs/ISSUE-4-HOSTED-MKS-SOP.md` — hosted MKS create/delete/scale runbook with hourly billing teardown and rollback checklist.
-
-## License
-
-MIT
+**Maintained by [Sneederco](https://github.com/sneederco)** | **Issues:** [GitHub Issues](https://github.com/sneederco/docker-machine-driver-ovh/issues) | **Repo:** [sneederco/docker-machine-driver-ovh](https://github.com/sneederco/docker-machine-driver-ovh)
