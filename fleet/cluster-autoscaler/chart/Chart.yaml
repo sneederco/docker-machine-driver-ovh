@@ -1,0 +1,5 @@
+apiVersion: v2
+name: cluster-autoscaler-rancher
+description: Cluster Autoscaler with Rancher provider for OVH node pools
+version: 1.0.0
+appVersion: "1.31.0"

@@ -1,0 +1,26 @@
+defaultNamespace: cluster-autoscaler
+helm:
+  releaseName: cluster-autoscaler
+  chart: ./chart
+  values:
+    # These get overridden by cluster labels
+    rancher:
+      url: ""
+      token: ""
+    cluster:
+      name: ""
+      namespace: "fleet-default"
+
+# Deploy to clusters with autoscaler enabled annotation
+targetCustomizations:
+- name: autoscaler-enabled
+  clusterSelector:
+    matchLabels:
+      autoscaler.sneederco.io/enabled: "true"
+  helm:
+    values:
+      rancher:
+        url: "${CATTLE_SERVER}"
+        token: "${CATTLE_TOKEN}"
+      cluster:
+        name: "${CLUSTER_NAME}"

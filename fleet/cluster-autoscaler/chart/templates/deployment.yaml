@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: cluster-autoscaler
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      serviceAccountName: cluster-autoscaler
+      priorityClassName: system-cluster-critical
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: cluster-autoscaler
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /cluster-autoscaler
+            - --cloud-provider=rancher
+            - --cloud-config=/etc/rancher/cloud-config
+            - --namespace=cluster-autoscaler
+            - --logtostderr=true
+            - --v=4
+            - --scale-down-enabled={{ .Values.autoscaler.scaleDownEnabled }}
+            - --scale-down-delay-after-add={{ .Values.autoscaler.scaleDownDelayAfterAdd }}
+            - --scale-down-unneeded-time={{ .Values.autoscaler.scaleDownUnneededTime }}
+            - --skip-nodes-with-local-storage={{ .Values.autoscaler.skipNodesWithLocalStorage }}
+          volumeMounts:
+            - name: cloud-config
+              mountPath: /etc/rancher
+              readOnly: true
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
+      volumes:
+        - name: cloud-config
+          configMap:
+            name: cluster-autoscaler-cloud-config
+            items:
+              - key: cloud-config
+                path: cloud-config

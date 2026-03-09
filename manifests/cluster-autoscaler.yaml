@@ -1,5 +1,6 @@
 # Cluster Autoscaler for Rancher - OVH Node Driver
-# This is auto-deployed when enableAutoscaler=true
+# Deploy with: envsubst < cluster-autoscaler.yaml | kubectl apply -f -
+# Required env vars: RANCHER_URL, RANCHER_TOKEN, CLUSTER_NAME
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -91,6 +92,7 @@ spec:
         app: cluster-autoscaler
     spec:
       serviceAccountName: cluster-autoscaler
+      priorityClassName: system-cluster-critical
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
@@ -127,3 +129,6 @@ spec:
         - name: cloud-config
           configMap:
             name: cluster-autoscaler-cloud-config
+            items:
+              - key: cloud-config
+                path: cloud-config

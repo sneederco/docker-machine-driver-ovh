@@ -1,0 +1,27 @@
+image:
+  repository: registry.k8s.io/autoscaling/cluster-autoscaler
+  tag: v1.31.0
+  pullPolicy: IfNotPresent
+
+rancher:
+  url: ""
+  token: ""
+  insecureSkipVerify: true
+
+cluster:
+  name: ""
+  namespace: "fleet-default"
+
+autoscaler:
+  scaleDownEnabled: true
+  scaleDownDelayAfterAdd: "5m"
+  scaleDownUnneededTime: "5m"
+  skipNodesWithLocalStorage: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 300Mi
+  limits:
+    cpu: 500m
+    memory: 600Mi
