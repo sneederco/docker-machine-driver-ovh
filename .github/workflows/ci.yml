@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - master
-      - issue-4-mks-mvp
   pull_request:
   workflow_dispatch:
 
@@ -17,49 +16,43 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - name: Prepare GOPATH layout for vendored legacy build
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco"
-          ln -s "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco/docker-machine-driver-ovh"
+          cache: true
       - name: Run tests
-        env:
-          GOPATH: ${{ github.workspace }}/.gopath
-          GO111MODULE: off
-        run: |
-          cd "$GOPATH/src/github.com/sneederco/docker-machine-driver-ovh"
-          go test ./...
+        run: go test -v ./...
 
   build:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - name: Prepare GOPATH layout for vendored legacy build
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco"
-          ln -s "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco/docker-machine-driver-ovh"
-      - name: Build linux/${{ matrix.arch }} binary + checksum
+          cache: true
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
-          GOPATH: ${{ github.workspace }}/.gopath
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
-          cd "$GOPATH/src/github.com/sneederco/docker-machine-driver-ovh"
-          ./scripts/build.sh "${{ matrix.arch }}" dist
-      - name: Upload artifact + checksum
+          mkdir -p dist
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          go build -ldflags="-s -w" -o dist/docker-machine-driver-ovh-${GOOS}-${GOARCH}${EXT} .
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: docker-machine-driver-ovh-linux-${{ matrix.arch }}
-          path: |
-            dist/docker-machine-driver-ovh-linux-${{ matrix.arch }}
-            dist/docker-machine-driver-ovh-linux-${{ matrix.arch }}.sha256
+          name: docker-machine-driver-ovh-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
 
-  reproducibility:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,17 +60,9 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - name: Prepare GOPATH layout for vendored legacy build
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco"
-          ln -s "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco/docker-machine-driver-ovh"
-      - name: Rebuild amd64 twice and verify matching digest
-        env:
-          GOPATH: ${{ github.workspace }}/.gopath
-        run: |
-          cd "$GOPATH/src/github.com/sneederco/docker-machine-driver-ovh"
-          ./scripts/build.sh amd64 dist
-          awk '{print $1}' dist/docker-machine-driver-ovh-linux-amd64.sha256 > /tmp/first.sha256
-          ./scripts/build.sh amd64 dist2
-          awk '{print $1}' dist2/docker-machine-driver-ovh-linux-amd64.sha256 > /tmp/second.sha256
-          diff -u /tmp/first.sha256 /tmp/second.sha256
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          args: --timeout=5m

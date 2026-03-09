@@ -3,6 +3,7 @@ module github.com/sneederco/docker-machine-driver-ovh
 go 1.25.6
 
 require (
+	github.com/docker/machine v0.16.2
 	github.com/ovh/go-ovh v1.9.0
 	github.com/rancher/machine v0.16.2
 	github.com/sirupsen/logrus v1.9.4
@@ -11,7 +12,6 @@ require (
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/docker/docker v20.10.27+incompatible // indirect
-	github.com/docker/machine v0.16.2 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/moby/term v0.5.2 // indirect
 	golang.org/x/crypto v0.21.0 // indirect
