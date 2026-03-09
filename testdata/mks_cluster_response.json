@@ -1,0 +1,12 @@
+{
+  "id": "cluster-k8s-abc123",
+  "name": "test-k8s-cluster",
+  "region": "US-EAST-VA-1",
+  "version": "1.28.5",
+  "status": "READY",
+  "controlPlaneIsUpToDate": true,
+  "isUpToDate": true,
+  "nextUpgradeVersions": ["1.29.0"],
+  "nodesSubnetId": "subnet-xyz789",
+  "privateNetworkId": "private-net-abc"
+}

@@ -1,0 +1,23 @@
+[
+  {
+    "name": "US-EAST-VA-1",
+    "status": "UP",
+    "type": "openstack",
+    "continent": "NA",
+    "services": ["compute", "network", "storage"]
+  },
+  {
+    "name": "GRA7",
+    "status": "UP",
+    "type": "openstack",
+    "continent": "EU",
+    "services": ["compute", "network", "storage"]
+  },
+  {
+    "name": "BHS5",
+    "status": "UP",
+    "type": "openstack",
+    "continent": "NA",
+    "services": ["compute", "network", "storage"]
+  }
+]

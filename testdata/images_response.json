@@ -1,0 +1,35 @@
+[
+  {
+    "id": "ubuntu-24-04-uuid",
+    "name": "Ubuntu 24.04",
+    "region": "US-EAST-VA-1",
+    "type": "linux",
+    "status": "active",
+    "visibility": "public",
+    "minDisk": 10,
+    "size": 2147483648,
+    "creationDate": "2024-04-25T00:00:00Z"
+  },
+  {
+    "id": "ubuntu-22-04-uuid",
+    "name": "Ubuntu 22.04",
+    "region": "US-EAST-VA-1",
+    "type": "linux",
+    "status": "active",
+    "visibility": "public",
+    "minDisk": 10,
+    "size": 1879048192,
+    "creationDate": "2023-04-21T00:00:00Z"
+  },
+  {
+    "id": "debian-12-uuid",
+    "name": "Debian 12",
+    "region": "US-EAST-VA-1",
+    "type": "linux",
+    "status": "active",
+    "visibility": "public",
+    "minDisk": 10,
+    "size": 1610612736,
+    "creationDate": "2023-06-10T00:00:00Z"
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "b3-8-flavor-uuid",
+    "name": "b3-8",
+    "region": "US-EAST-VA-1",
+    "osType": "linux",
+    "vcpus": 2,
+    "ram": 8192,
+    "disk": 50,
+    "type": "general_purpose",
+    "available": true,
+    "quota": 10
+  },
+  {
+    "id": "b3-16-flavor-uuid",
+    "name": "b3-16",
+    "region": "US-EAST-VA-1",
+    "osType": "linux",
+    "vcpus": 4,
+    "ram": 16384,
+    "disk": 100,
+    "type": "general_purpose",
+    "available": true,
+    "quota": 5
+  }
+]
