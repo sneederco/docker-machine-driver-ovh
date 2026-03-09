@@ -130,7 +130,7 @@ type Image struct {
 	Status       string `json:"status"`
 	MinDisk      int    `json:"minDisk"`
 	Visibility   string `json:"visibility"`
-	Size         int64  `json:"size,omitempty"`
+	Size         float64  `json:"size,omitempty"`
 	PlanCode     string `json:"planCode,omitempty"`
 }
 
@@ -204,11 +204,11 @@ type NetworkParams []NetworkParam
 // InstanceReq defines the fields for a VM creation
 type InstanceReq struct {
 	Name           string        `json:"name"`
-	FlavorID       string        `json:"flavorID"`
-	ImageID        string        `json:"imageID"`
+	FlavorID       string        `json:"flavorId"`
+	ImageID        string        `json:"imageId"`
 	Region         string        `json:"region"`
 	NetworkParams  NetworkParams `json:"networks"`
-	SshkeyID       string        `json:"sshKeyID"`
+	SshkeyID       string        `json:"sshKeyId"`
 	MonthlyBilling bool          `json:"monthlyBilling"`
 }
 
