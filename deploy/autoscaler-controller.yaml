@@ -1,0 +1,272 @@
+# Autoscaler Auto-Deploy Controller
+# Watches for clusters with autoscaler annotations and deploys cluster-autoscaler
+# Deploy to: Rancher management cluster (local cluster)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: autoscaler-controller
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: autoscaler-controller
+  namespace: autoscaler-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: autoscaler-controller
+rules:
+  # Watch clusters
+  - apiGroups: ["provisioning.cattle.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Create apps
+  - apiGroups: ["catalog.cattle.io"]
+    resources: ["apps"]
+    verbs: ["get", "list", "create", "update"]
+  # Read secrets for Rancher token
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  # Access Rancher settings
+  - apiGroups: ["management.cattle.io"]
+    resources: ["settings"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: autoscaler-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: autoscaler-controller
+subjects:
+  - kind: ServiceAccount
+    name: autoscaler-controller
+    namespace: autoscaler-controller
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rancher-credentials
+  namespace: autoscaler-controller
+type: Opaque
+stringData:
+  # Replace with actual Rancher API token
+  token: "${RANCHER_TOKEN}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autoscaler-controller
+  namespace: autoscaler-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: autoscaler-controller
+  template:
+    metadata:
+      labels:
+        app: autoscaler-controller
+    spec:
+      serviceAccountName: autoscaler-controller
+      containers:
+        - name: controller
+          image: bitnami/kubectl:1.31
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              RANCHER_URL=$(kubectl get settings.management.cattle.io server-url -o jsonpath='{.value}')
+              RANCHER_TOKEN=$(cat /etc/rancher-creds/token)
+              
+              echo "Autoscaler Controller started"
+              echo "Rancher URL: $RANCHER_URL"
+              echo "Watching for clusters with autoscaler annotations..."
+              
+              while true; do
+                # Get all clusters in fleet-default
+                kubectl get clusters.provisioning.cattle.io -n fleet-default -o json | \
+                jq -r '.items[] | select(.status.clusterName != null) | select(.status.clusterName != "") | 
+                  select(.metadata.labels["autoscaler.sneederco.io/deployed"] != "true") |
+                  select(.spec.rkeConfig.machinePools[0].machineDeploymentAnnotations["cluster.provisioning.cattle.io/autoscaler-min-size"] != null) |
+                  "\(.metadata.name)|\(.status.clusterName)"' | \
+                while IFS='|' read -r CLUSTER_NAME CLUSTER_ID; do
+                  [ -z "$CLUSTER_NAME" ] && continue
+                  
+                  echo "Found cluster needing autoscaler: $CLUSTER_NAME ($CLUSTER_ID)"
+                  
+                  # Get min/max from annotations
+                  MIN_SIZE=$(kubectl get clusters.provisioning.cattle.io "$CLUSTER_NAME" -n fleet-default -o jsonpath='{.spec.rkeConfig.machinePools[0].machineDeploymentAnnotations.cluster\.provisioning\.cattle\.io/autoscaler-min-size}')
+                  MAX_SIZE=$(kubectl get clusters.provisioning.cattle.io "$CLUSTER_NAME" -n fleet-default -o jsonpath='{.spec.rkeConfig.machinePools[0].machineDeploymentAnnotations.cluster\.provisioning\.cattle\.io/autoscaler-max-size}')
+                  
+                  echo "  Min: $MIN_SIZE, Max: $MAX_SIZE"
+                  
+                  # Get downstream kubeconfig
+                  KUBECONFIG_DATA=$(curl -sk "$RANCHER_URL/v3/clusters/$CLUSTER_ID?action=generateKubeconfig" \
+                    -H "Authorization: Bearer $RANCHER_TOKEN" \
+                    -X POST | jq -r '.config')
+                  
+                  if [ -z "$KUBECONFIG_DATA" ] || [ "$KUBECONFIG_DATA" = "null" ]; then
+                    echo "  Failed to get kubeconfig, skipping"
+                    continue
+                  fi
+                  
+                  echo "$KUBECONFIG_DATA" > /tmp/downstream.kubeconfig
+                  
+                  # Apply autoscaler manifest
+                  echo "  Deploying autoscaler..."
+                  cat <<MANIFEST | envsubst | kubectl --kubeconfig=/tmp/downstream.kubeconfig apply -f -
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: cluster-autoscaler
+              ---
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: cluster-autoscaler
+                namespace: cluster-autoscaler
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: cluster-autoscaler
+              rules:
+                - apiGroups: [""]
+                  resources: ["events","endpoints","configmaps"]
+                  verbs: ["create","patch","get","list","watch","update"]
+                - apiGroups: [""]
+                  resources: ["pods/eviction"]
+                  verbs: ["create"]
+                - apiGroups: [""]
+                  resources: ["pods/status"]
+                  verbs: ["update"]
+                - apiGroups: [""]
+                  resources: ["nodes"]
+                  verbs: ["watch","list","get","update"]
+                - apiGroups: [""]
+                  resources: ["namespaces","pods","services","replicationcontrollers","persistentvolumeclaims","persistentvolumes"]
+                  verbs: ["watch","list","get"]
+                - apiGroups: ["batch"]
+                  resources: ["jobs","cronjobs"]
+                  verbs: ["watch","list","get"]
+                - apiGroups: ["extensions","apps"]
+                  resources: ["daemonsets","replicasets","statefulsets","deployments"]
+                  verbs: ["watch","list","get"]
+                - apiGroups: ["policy"]
+                  resources: ["poddisruptionbudgets"]
+                  verbs: ["watch","list"]
+                - apiGroups: ["storage.k8s.io"]
+                  resources: ["storageclasses","csinodes","csidrivers","csistoragecapacities"]
+                  verbs: ["watch","list","get"]
+                - apiGroups: ["coordination.k8s.io"]
+                  resources: ["leases"]
+                  verbs: ["create","get","update","list","watch"]
+              ---
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: cluster-autoscaler
+              roleRef:
+                apiGroup: rbac.authorization.k8s.io
+                kind: ClusterRole
+                name: cluster-autoscaler
+              subjects:
+                - kind: ServiceAccount
+                  name: cluster-autoscaler
+                  namespace: cluster-autoscaler
+              ---
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: cluster-autoscaler-cloud-config
+                namespace: cluster-autoscaler
+              data:
+                cloud-config: |
+                  url: $RANCHER_URL
+                  token: $RANCHER_TOKEN
+                  clusterName: $CLUSTER_NAME
+                  clusterNamespace: fleet-default
+                  insecureSkipVerify: true
+              ---
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: cluster-autoscaler
+                namespace: cluster-autoscaler
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: cluster-autoscaler
+                template:
+                  metadata:
+                    labels:
+                      app: cluster-autoscaler
+                  spec:
+                    serviceAccountName: cluster-autoscaler
+                    priorityClassName: system-cluster-critical
+                    tolerations:
+                      - key: node-role.kubernetes.io/control-plane
+                        operator: Exists
+                        effect: NoSchedule
+                    containers:
+                      - name: cluster-autoscaler
+                        image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.31.0
+                        command:
+                          - /cluster-autoscaler
+                          - --cloud-provider=rancher
+                          - --cloud-config=/etc/rancher/cloud-config
+                          - --namespace=cluster-autoscaler
+                          - --logtostderr=true
+                          - --v=4
+                          - --scale-down-enabled=true
+                          - --scale-down-delay-after-add=5m
+                          - --scale-down-unneeded-time=5m
+                        volumeMounts:
+                          - name: cloud-config
+                            mountPath: /etc/rancher
+                            readOnly: true
+                        resources:
+                          requests:
+                            cpu: 100m
+                            memory: 300Mi
+                    volumes:
+                      - name: cloud-config
+                        configMap:
+                          name: cluster-autoscaler-cloud-config
+                          items:
+                            - key: cloud-config
+                              path: cloud-config
+              MANIFEST
+                  
+                  # Mark cluster as deployed
+                  kubectl label clusters.provisioning.cattle.io "$CLUSTER_NAME" -n fleet-default \
+                    autoscaler.sneederco.io/deployed=true --overwrite
+                  
+                  echo "  ✅ Autoscaler deployed to $CLUSTER_NAME"
+                  rm -f /tmp/downstream.kubeconfig
+                done
+                
+                sleep 30
+              done
+          volumeMounts:
+            - name: rancher-creds
+              mountPath: /etc/rancher-creds
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: rancher-creds
+          secret:
+            secretName: rancher-credentials

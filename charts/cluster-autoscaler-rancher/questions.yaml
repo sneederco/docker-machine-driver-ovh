@@ -1,0 +1,42 @@
+questions:
+- variable: rancher.url
+  label: Rancher Server URL
+  description: "URL of your Rancher server (e.g., https://rancher.example.com)"
+  type: string
+  required: true
+  group: "Rancher Connection"
+
+- variable: rancher.token
+  label: Rancher API Token
+  description: "API token with cluster edit permissions (format: token-xxxxx:yyyyy)"
+  type: password
+  required: true
+  group: "Rancher Connection"
+
+- variable: cluster.name
+  label: Cluster Name
+  description: "Name of this cluster in Rancher"
+  type: string
+  required: true
+  group: "Rancher Connection"
+
+- variable: autoscaler.scaleDownEnabled
+  label: Enable Scale Down
+  description: "Allow autoscaler to remove underutilized nodes"
+  type: boolean
+  default: true
+  group: "Autoscaler Settings"
+
+- variable: autoscaler.scaleDownDelayAfterAdd
+  label: Scale Down Delay After Add
+  description: "How long to wait after adding a node before considering scale down"
+  type: string
+  default: "5m"
+  group: "Autoscaler Settings"
+
+- variable: autoscaler.scaleDownUnneededTime
+  label: Scale Down Unneeded Time
+  description: "How long a node must be underutilized before removal"
+  type: string
+  default: "5m"
+  group: "Autoscaler Settings"

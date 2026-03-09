@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-autoscaler-cloud-config
+  namespace: cluster-autoscaler
+data:
+  cloud-config: |
+    url: {{ .Values.rancher.url }}
+    token: {{ .Values.rancher.token }}
+    clusterName: {{ .Values.cluster.name }}
+    clusterNamespace: {{ .Values.cluster.namespace }}
+    insecureSkipVerify: {{ .Values.rancher.insecureSkipVerify }}
