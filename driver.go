@@ -53,6 +53,7 @@ type Driver struct {
 	BillingPeriod      string
 	UserdataPath       string
 	Tags               string
+	SecurityGroup      string
 
 	// Hosted MKS mode parameters
 	HostedMKS              bool
@@ -152,6 +153,11 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage: "OVH Cloud instance metadata tags (comma-separated)",
 			Value: "",
 		},
+		mcnflag.StringFlag{
+			Name:  "ovh-security-group",
+			Usage: "OVH Cloud security group name or id. Default: default",
+			Value: DefaultSecurityGroup,
+		},
 		mcnflag.BoolFlag{
 			Name:  "ovh-hosted-mks",
 			Usage: "Use OVH Managed Kubernetes Service (MKS) hosted mode instead of a single VM instance",
@@ -221,6 +227,7 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.BillingPeriod = flags.String("ovh-billing-period")
 	d.UserdataPath = flags.String("ovh-userdata")
 	d.Tags = flags.String("ovh-tags")
+	d.SecurityGroup = flags.String("ovh-security-group")
 
 	// MKS configuration
 	d.HostedMKS = flags.Bool("ovh-hosted-mks")
@@ -668,6 +675,7 @@ func (d *Driver) createInstance(ctx context.Context, client *API) error {
 		d.Userdata,
 		d.NetworkIDs,
 		monthlyBilling,
+		d.SecurityGroup,
 	)
 	if err != nil {
 		// Cleanup SSH key if we created it

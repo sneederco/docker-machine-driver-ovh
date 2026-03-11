@@ -211,6 +211,7 @@ type InstanceReq struct {
 	NetworkParams  NetworkParams `json:"networks"`
 	SshkeyID       string        `json:"sshKeyId"`
 	MonthlyBilling bool          `json:"monthlyBilling"`
+	SecurityGroup  string        `json:"securityGroup,omitempty"`
 }
 
 // Instance is a go representation of Cloud instance
@@ -226,6 +227,7 @@ type Instance struct {
 	Sshkey         SSHKey        `json:"sshKey"`
 	IPAddresses    IPs           `json:"ipAddresses"`
 	MonthlyBilling bool          `json:"monthlyBilling"`
+	SecurityGroup  string        `json:"securityGroup,omitempty"`
 }
 
 // MKSClusterCreateReq defines the fields for OVH Managed Kubernetes cluster creation.
@@ -740,7 +742,7 @@ func (a *API) GetPrivateNetworkByName(ctx context.Context, projectID, networkNam
 }
 
 // CreateInstance starts a new public cloud instance and returns resulting object
-func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, flavorID, imageID, region, userData string, networkIDs []string, monthlyBilling bool) (*Instance, error) {
+func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, flavorID, imageID, region, userData string, networkIDs []string, monthlyBilling bool, securityGroup string) (*Instance, error) {
 	var instance Instance
 	req := InstanceReq{
 		UserData:       userData,
@@ -750,6 +752,7 @@ func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, fla
 		ImageID:        imageID,
 		Region:         region,
 		MonthlyBilling: monthlyBilling,
+		SecurityGroup:  securityGroup,
 	}
 
 	for _, v := range networkIDs {
