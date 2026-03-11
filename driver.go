@@ -55,6 +55,11 @@ type Driver struct {
 	Tags               string
 	SecurityGroup      string
 
+	// OpenStack credentials for security group attachment
+	OpenStackAuthURL   string
+	OpenStackUsername  string
+	OpenStackPassword  string
+
 	// Hosted MKS mode parameters
 	HostedMKS              bool
 	MKSClusterName         string
@@ -158,6 +163,21 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage: "OVH Cloud security group name or id. Default: default",
 			Value: DefaultSecurityGroup,
 		},
+		mcnflag.StringFlag{
+			Name:  "ovh-openstack-auth-url",
+			Usage: "OpenStack auth URL for security group management (e.g., https://auth.cloud.ovh.us/v3)",
+			Value: "",
+		},
+		mcnflag.StringFlag{
+			Name:  "ovh-openstack-username",
+			Usage: "OpenStack username for security group management",
+			Value: "",
+		},
+		mcnflag.StringFlag{
+			Name:  "ovh-openstack-password",
+			Usage: "OpenStack password for security group management",
+			Value: "",
+		},
 		mcnflag.BoolFlag{
 			Name:  "ovh-hosted-mks",
 			Usage: "Use OVH Managed Kubernetes Service (MKS) hosted mode instead of a single VM instance",
@@ -228,6 +248,9 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.UserdataPath = flags.String("ovh-userdata")
 	d.Tags = flags.String("ovh-tags")
 	d.SecurityGroup = flags.String("ovh-security-group")
+	d.OpenStackAuthURL = flags.String("ovh-openstack-auth-url")
+	d.OpenStackUsername = flags.String("ovh-openstack-username")
+	d.OpenStackPassword = flags.String("ovh-openstack-password")
 
 	// MKS configuration
 	d.HostedMKS = flags.Bool("ovh-hosted-mks")
@@ -675,7 +698,6 @@ func (d *Driver) createInstance(ctx context.Context, client *API) error {
 		d.Userdata,
 		d.NetworkIDs,
 		monthlyBilling,
-		d.SecurityGroup,
 	)
 	if err != nil {
 		// Cleanup SSH key if we created it

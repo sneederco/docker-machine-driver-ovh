@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io/ioutil"
+	"net/http"
+	"encoding/json"
 	"math"
 	"strings"
 	"time"
@@ -211,7 +215,6 @@ type InstanceReq struct {
 	NetworkParams  NetworkParams `json:"networks"`
 	SshkeyID       string        `json:"sshKeyId"`
 	MonthlyBilling bool          `json:"monthlyBilling"`
-	SecurityGroup  string        `json:"securityGroup,omitempty"`
 }
 
 // Instance is a go representation of Cloud instance
@@ -742,7 +745,7 @@ func (a *API) GetPrivateNetworkByName(ctx context.Context, projectID, networkNam
 }
 
 // CreateInstance starts a new public cloud instance and returns resulting object
-func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, flavorID, imageID, region, userData string, networkIDs []string, monthlyBilling bool, securityGroup string) (*Instance, error) {
+func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, flavorID, imageID, region, userData string, networkIDs []string, monthlyBilling bool) (*Instance, error) {
 	var instance Instance
 	req := InstanceReq{
 		UserData:       userData,
@@ -752,7 +755,6 @@ func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, fla
 		ImageID:        imageID,
 		Region:         region,
 		MonthlyBilling: monthlyBilling,
-		SecurityGroup:  securityGroup,
 	}
 
 	for _, v := range networkIDs {
@@ -880,4 +882,177 @@ func (a *API) ScaleMKSNodePool(ctx context.Context, projectID, clusterID, nodePo
 	return a.doWithRetry(ctx, "ScaleMKSNodePool", resource, func() error {
 		return a.client.PutWithContext(ctx, resource, req, nil)
 	})
+}
+
+
+// OpenStackSecurityGroupManager handles security group attachment via OpenStack
+type OpenStackSecurityGroupManager struct {
+	AuthURL   string
+	Username  string
+	Password  string
+	ProjectID string
+	Region    string
+}
+
+// AttachSecurityGroupToInstance attaches a security group to an OVH instance using OpenStack API
+func AttachSecurityGroupToInstance(authURL, username, password, projectID, region, instanceID, securityGroupName string) error {
+	if securityGroupName == "" || securityGroupName == "default" {
+		return nil // No custom security group to attach
+	}
+
+	// Get OpenStack token
+	token, err := getOpenStackToken(authURL, username, password, projectID)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate with OpenStack: %w", err)
+	}
+
+	// Find security group ID
+	sgID, err := findSecurityGroupID(authURL, token, securityGroupName)
+	if err != nil {
+		return fmt.Errorf("failed to find security group: %w", err)
+	}
+
+	// Find instance ports and attach security group
+	neutronURL := fmt.Sprintf("https://network.compute.%s.cloud.ovh.net", region)
+	if err := attachSGToInstancePorts(neutronURL, token, instanceID, sgID); err != nil {
+		return fmt.Errorf("failed to attach security group to instance: %w", err)
+	}
+
+	return nil
+}
+
+func getOpenStackToken(authURL, username, password, projectID string) (string, error) {
+	authBody := map[string]interface{}{
+		"auth": map[string]interface{}{
+			"identity": map[string]interface{}{
+				"methods": []string{"password"},
+				"password": map[string]interface{}{
+					"user": map[string]interface{}{
+						"name":     username,
+						"domain":   map[string]string{"id": "default"},
+						"password": password,
+					},
+				},
+			},
+			"scope": map[string]interface{}{
+				"project": map[string]interface{}{
+					"id": projectID,
+				},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(authBody)
+	resp, err := http.Post(authURL+"/auth/tokens", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		respBody, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("auth failed: %s", string(respBody))
+	}
+
+	return resp.Header.Get("X-Subject-Token"), nil
+}
+
+func findSecurityGroupID(authURL, token, sgName string) (string, error) {
+	// Extract region from authURL for Neutron endpoint
+	region := "us-east-va-1" // Default fallback
+	if strings.Contains(authURL, "us-east") {
+		region = "us-east-va-1"
+	}
+
+	neutronURL := fmt.Sprintf("https://network.compute.%s.cloud.ovh.net/v2.0/security-groups?name=%s", region, sgName)
+
+	req, _ := http.NewRequest("GET", neutronURL, nil)
+	req.Header.Set("X-Auth-Token", token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("failed to list security groups: %s", string(body))
+	}
+
+	var result struct {
+		SecurityGroups []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"security_groups"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	for _, sg := range result.SecurityGroups {
+		if sg.Name == sgName {
+			return sg.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("security group %s not found", sgName)
+}
+
+func attachSGToInstancePorts(neutronBaseURL, token, instanceID, sgID string) error {
+	// List ports for this instance
+	portsURL := fmt.Sprintf("%s/v2.0/ports?device_id=%s", neutronBaseURL, instanceID)
+
+	req, _ := http.NewRequest("GET", portsURL, nil)
+	req.Header.Set("X-Auth-Token", token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("failed to list ports: %s", string(body))
+	}
+
+	var result struct {
+		Ports []struct {
+			ID string `json:"id"`
+		} `json:"ports"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+
+	// Update each port with the security group
+	for _, port := range result.Ports {
+		updateURL := fmt.Sprintf("%s/v2.0/ports/%s", neutronBaseURL, port.ID)
+		updateBody := map[string]interface{}{
+			"port": map[string]interface{}{
+				"security_groups": []string{sgID},
+			},
+		}
+
+		body, _ := json.Marshal(updateBody)
+		req, _ := http.NewRequest("PUT", updateURL, bytes.NewBuffer(body))
+		req.Header.Set("X-Auth-Token", token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to update port %s: %w", port.ID, err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			body, _ := ioutil.ReadAll(resp.Body)
+			return fmt.Errorf("failed to update port %s: %s", port.ID, string(body))
+		}
+	}
+
+	return nil
 }
