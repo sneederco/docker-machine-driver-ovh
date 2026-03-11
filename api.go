@@ -964,7 +964,7 @@ func findSecurityGroupID(authURL, token, sgName string) (string, error) {
 		region = "us-east-va-1"
 	}
 
-	neutronURL := fmt.Sprintf("https://network.compute.%s.cloud.ovh.net/v2.0/security-groups?name=%s", region, sgName)
+	neutronURL := fmt.Sprintf("https://network.%s.cloud.ovh.us/v2.0/security-groups?name=%s", region, sgName)
 
 	req, _ := http.NewRequest("GET", neutronURL, nil)
 	req.Header.Set("X-Auth-Token", token)
