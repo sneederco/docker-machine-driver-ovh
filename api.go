@@ -913,7 +913,7 @@ func AttachSecurityGroupToInstance(authURL, username, password, projectID, regio
 	}
 
 	// Find instance ports and attach security group
-	neutronURL := fmt.Sprintf("https://network.compute.%s.cloud.ovh.net", region)
+	neutronURL := fmt.Sprintf("https://network.%s.cloud.ovh.us/", region)
 	if err := attachSGToInstancePorts(neutronURL, token, instanceID, sgID); err != nil {
 		return fmt.Errorf("failed to attach security group to instance: %w", err)
 	}
