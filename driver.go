@@ -733,6 +733,28 @@ func (d *Driver) createInstance(ctx context.Context, client *API) error {
 
 	log.Infof("Instance is active. IP address: %s", d.IPAddress)
 
+	// Attach security group if specified and OpenStack credentials provided
+	log.Debugf("SG Check: SecurityGroup=%s, AuthUrl=%s, Username=%s, Password=%s",
+		d.SecurityGroup, d.OpenstackAuthUrl, d.OpenstackUsername, d.OpenstackPassword != "")
+	if d.SecurityGroup != "" && d.SecurityGroup != "default" &&
+		d.OpenstackAuthUrl != "" && d.OpenstackUsername != "" && d.OpenstackPassword != "" {
+		log.Warnf("Attaching security group %s to instance...", d.SecurityGroup)
+		if err := AttachSecurityGroupToInstance(
+			d.OpenstackAuthUrl,
+			d.OpenstackUsername,
+			d.OpenstackPassword,
+			d.ProjectID,
+			d.RegionName,
+			d.InstanceID,
+			d.SecurityGroup,
+		); err != nil {
+			log.Warnf("Failed to attach security group: %v", err)
+			// Don't fail the whole creation, just warn
+		} else {
+			log.Warnf("Security group %s attached successfully", d.SecurityGroup)
+		}
+	}
+
 	return nil
 }
 
