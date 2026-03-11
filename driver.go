@@ -56,9 +56,9 @@ type Driver struct {
 	SecurityGroup      string
 
 	// OpenStack credentials for security group attachment
-	OpenStackAuthURL   string
-	OpenStackUsername  string
-	OpenStackPassword  string
+	OpenstackAuthUrl   string
+	OpenstackUsername  string
+	OpenstackPassword  string
 
 	// Hosted MKS mode parameters
 	HostedMKS              bool
@@ -248,9 +248,9 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.UserdataPath = flags.String("ovh-userdata")
 	d.Tags = flags.String("ovh-tags")
 	d.SecurityGroup = flags.String("ovh-security-group")
-	d.OpenStackAuthURL = flags.String("ovh-openstack-auth-url")
-	d.OpenStackUsername = flags.String("ovh-openstack-username")
-	d.OpenStackPassword = flags.String("ovh-openstack-password")
+	d.OpenstackAuthUrl = flags.String("ovh-openstack-auth-url")
+	d.OpenstackUsername = flags.String("ovh-openstack-username")
+	d.OpenstackPassword = flags.String("ovh-openstack-password")
 
 	// MKS configuration
 	d.HostedMKS = flags.Bool("ovh-hosted-mks")
