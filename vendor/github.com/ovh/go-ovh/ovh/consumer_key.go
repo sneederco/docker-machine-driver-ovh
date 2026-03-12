@@ -40,6 +40,7 @@ type CkValidationState struct {
 type CkRequest struct {
 	client      *Client
 	AccessRules []AccessRule `json:"accessRules"`
+	Redirection string       `json:"redirection,omitempty"`
 }
 
 func (ck *CkValidationState) String() string {
@@ -58,6 +59,15 @@ func (c *Client) NewCkRequest() *CkRequest {
 	}
 }
 
+// NewCkRequestWithRedirection helps create a new ck request with a redirect URL
+func (c *Client) NewCkRequestWithRedirection(redirection string) *CkRequest {
+	return &CkRequest{
+		client:      c,
+		AccessRules: []AccessRule{},
+		Redirection: redirection,
+	}
+}
+
 // AddRule adds a new rule to the ckRequest
 func (ck *CkRequest) AddRule(method, path string) {
 	ck.AccessRules = append(ck.AccessRules, AccessRule{
@@ -73,7 +83,6 @@ func (ck *CkRequest) AddRules(methods []string, path string) {
 	for _, method := range methods {
 		ck.AddRule(method, path)
 	}
-
 }
 
 // AddRecursiveRules adds grant requests on "path" and "path/*", for all

@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/docker/docker/pkg/term"
@@ -43,6 +46,7 @@ type NativeClient struct {
 	Hostname    string
 	Port        int
 	openSession *ssh.Session
+	openClient  *ssh.Client
 }
 
 type Auth struct {
@@ -63,15 +67,16 @@ const (
 
 var (
 	baseSSHArgs = []string{
-		"-o", "BatchMode=yes",
-		"-o", "PasswordAuthentication=no",
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "LogLevel=quiet", // suppress "Warning: Permanently added '[localhost]:2022' (ECDSA) to the list of known hosts."
+		"-F", "/dev/null",
 		"-o", "ConnectionAttempts=3", // retry 3 times if SSH connection fails
 		"-o", "ConnectTimeout=10", // timeout after 10 seconds
 		"-o", "ControlMaster=no", // disable ssh multiplexing
 		"-o", "ControlPath=none",
+		"-o", "LogLevel=quiet", // suppress "Warning: Permanently added '[localhost]:2022' (ECDSA) to the list of known hosts."
+		"-o", "PasswordAuthentication=no",
+		"-o", "ServerAliveInterval=60", // prevents connection to be dropped if command takes too long
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
 	}
 	defaultClientType = External
 )
@@ -147,51 +152,58 @@ func NewNativeConfig(user string, auth *Auth) (ssh.ClientConfig, error) {
 	}
 
 	return ssh.ClientConfig{
-		User: user,
-		Auth: authMethods,
+		User:            user,
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}, nil
 }
 
 func (client *NativeClient) dialSuccess() bool {
-	if _, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", client.Hostname, client.Port), &client.Config); err != nil {
+	conn, err := ssh.Dial("tcp", net.JoinHostPort(client.Hostname, strconv.Itoa(client.Port)), &client.Config)
+	if err != nil {
 		log.Debugf("Error dialing TCP: %s", err)
 		return false
 	}
+	closeConn(conn)
 	return true
 }
 
-func (client *NativeClient) session(command string) (*ssh.Session, error) {
+func (client *NativeClient) session(command string) (*ssh.Client, *ssh.Session, error) {
 	if err := mcnutils.WaitFor(client.dialSuccess); err != nil {
-		return nil, fmt.Errorf("Error attempting SSH client dial: %s", err)
+		return nil, nil, fmt.Errorf("Error attempting SSH client dial: %s", err)
 	}
 
-	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", client.Hostname, client.Port), &client.Config)
+	conn, err := ssh.Dial("tcp", net.JoinHostPort(client.Hostname, strconv.Itoa(client.Port)), &client.Config)
 	if err != nil {
-		return nil, fmt.Errorf("Mysterious error dialing TCP for SSH (we already succeeded at least once) : %s", err)
+		return nil, nil, fmt.Errorf("Mysterious error dialing TCP for SSH (we already succeeded at least once) : %s", err)
 	}
+	session, err := conn.NewSession()
 
-	return conn.NewSession()
+	return conn, session, err
 }
 
 func (client *NativeClient) Output(command string) (string, error) {
-	session, err := client.session(command)
+	conn, session, err := client.session(command)
 	if err != nil {
 		return "", nil
 	}
+	defer closeConn(conn)
+	defer session.Close()
 
 	output, err := session.CombinedOutput(command)
-	defer session.Close()
 
 	return string(output), err
 }
 
 func (client *NativeClient) OutputWithPty(command string) (string, error) {
-	session, err := client.session(command)
+	conn, session, err := client.session(command)
 	if err != nil {
 		return "", nil
 	}
+	defer closeConn(conn)
+	defer session.Close()
 
-	fd := int(os.Stdin.Fd())
+	fd := int(os.Stdout.Fd())
 
 	termWidth, termHeight, err := terminal.GetSize(fd)
 	if err != nil {
@@ -211,13 +223,12 @@ func (client *NativeClient) OutputWithPty(command string) (string, error) {
 	}
 
 	output, err := session.CombinedOutput(command)
-	defer session.Close()
 
 	return string(output), err
 }
 
 func (client *NativeClient) Start(command string) (io.ReadCloser, io.ReadCloser, error) {
-	session, err := client.session(command)
+	conn, session, err := client.session(command)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -234,25 +245,38 @@ func (client *NativeClient) Start(command string) (io.ReadCloser, io.ReadCloser,
 		return nil, nil, err
 	}
 
+	client.openClient = conn
 	client.openSession = session
 	return ioutil.NopCloser(stdout), ioutil.NopCloser(stderr), nil
 }
 
 func (client *NativeClient) Wait() error {
 	err := client.openSession.Wait()
+	if err != nil {
+		return err
+	}
+
 	_ = client.openSession.Close()
+
+	err = client.openClient.Close()
+	if err != nil {
+		return err
+	}
+
 	client.openSession = nil
-	return err
+	client.openClient = nil
+	return nil
 }
 
 func (client *NativeClient) Shell(args ...string) error {
 	var (
 		termWidth, termHeight int
 	)
-	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", client.Hostname, client.Port), &client.Config)
+	conn, err := ssh.Dial("tcp", net.JoinHostPort(client.Hostname, strconv.Itoa(client.Port)), &client.Config)
 	if err != nil {
 		return err
 	}
+	defer closeConn(conn)
 
 	session, err := conn.NewSession()
 	if err != nil {
@@ -297,11 +321,14 @@ func (client *NativeClient) Shell(args ...string) error {
 		if err := session.Shell(); err != nil {
 			return err
 		}
-		session.Wait()
+		if err := session.Wait(); err != nil {
+			return err
+		}
 	} else {
-		session.Run(strings.Join(args, " "))
+		if err := session.Run(strings.Join(args, " ")); err != nil {
+			return err
+		}
 	}
-
 	return nil
 }
 
@@ -327,12 +354,17 @@ func NewExternalClient(sshBinaryPath, user, host string, port int, auth *Auth) (
 				// Abort if key not accessible
 				return nil, err
 			}
-			mode := fi.Mode()
-			log.Debugf("Using SSH private key: %s (%s)", privateKeyPath, mode)
-			// Private key file should have strict permissions
-			if mode != 0600 {
-				// Abort with correct message
-				return nil, fmt.Errorf("Permissions %#o for '%s' are too open.", mode, privateKeyPath)
+			if runtime.GOOS != "windows" {
+				mode := fi.Mode()
+				log.Debugf("Using SSH private key: %s (%s)", privateKeyPath, mode)
+				// Private key file should have strict permissions
+				perm := mode.Perm()
+				if perm&0400 == 0 {
+					return nil, fmt.Errorf("'%s' is not readable", privateKeyPath)
+				}
+				if perm&0077 != 0 {
+					return nil, fmt.Errorf("permissions %#o for '%s' are too open", perm, privateKeyPath)
+				}
 			}
 			args = append(args, "-i", privateKeyPath)
 		}
@@ -405,4 +437,11 @@ func (client *ExternalClient) Wait() error {
 	err := client.cmd.Wait()
 	client.cmd = nil
 	return err
+}
+
+func closeConn(c io.Closer) {
+	err := c.Close()
+	if err != nil {
+		log.Debugf("Error closing SSH Client: %s", err)
+	}
 }

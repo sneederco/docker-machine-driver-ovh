@@ -177,7 +177,10 @@ func (f *DefaultRPCClientDriverFactory) NewRPCClientDriver(driverName string, ra
 				return
 			case <-time.After(heartbeatInterval):
 				if err := c.Client.Call(HeartbeatMethod, struct{}{}, nil); err != nil {
-					log.Warnf("Error attempting heartbeat call to plugin server: %s", err)
+					log.Warnf("Wrapper Docker Machine process exiting due to closed plugin server (%s)", err)
+					if err := c.close(); err != nil {
+						log.Warn(err)
+					}
 				}
 			}
 		}
@@ -210,10 +213,11 @@ func (c *RPCClientDriver) close() error {
 	log.Debug("Making call to close driver server")
 
 	if err := c.Client.Call(CloseMethod, struct{}{}, nil); err != nil {
-		return err
+		log.Debugf("Failed to make call to close driver server: %s", err)
+	} else {
+		log.Debug("Successfully made call to close driver server")
 	}
 
-	log.Debug("Successfully made call to close driver server")
 	log.Debug("Making call to close connection to plugin binary")
 
 	return c.plugin.Close()
