@@ -1,19 +1,85 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
-	"github.com/ovh/go-ovh/ovh"
+	"io/ioutil"
+	"net/http"
+	"encoding/json"
+	"math"
 	"strings"
+	"time"
+
+	"github.com/ovh/go-ovh/ovh"
+	"github.com/sirupsen/logrus"
 )
 
 const (
 	// CustomerInterface is the URL of the customer interface, for error messages
 	CustomerInterface = "https://www.ovh.com/manager/cloud/index.html"
+
+	// Retry configuration
+	defaultMaxRetries    = 3
+	defaultRetryDelay    = 1 * time.Second
+	defaultRetryMaxDelay = 30 * time.Second
+
+	// Rate limiting
+	defaultRateLimitDelay = 100 * time.Millisecond
 )
 
-// API is a handle to an instanciated OVH API.
+// APIError wraps OVH API errors with additional context
+type APIError struct {
+	Operation  string // The operation that failed (e.g., "GetProject")
+	Resource   string // The resource being accessed (e.g., "project/abc123")
+	StatusCode int    // HTTP status code
+	OVHCode    int    // OVH-specific error code
+	Message    string // Error message
+	Err        error  // Original error
+}
+
+func (e *APIError) Error() string {
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("%s failed for %s (HTTP %d): %s", e.Operation, e.Resource, e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("%s failed for %s: %s", e.Operation, e.Resource, e.Message)
+}
+
+func (e *APIError) Unwrap() error {
+	return e.Err
+}
+
+// IsNotFound returns true if the error is a 404 Not Found
+func (e *APIError) IsNotFound() bool {
+	return e.StatusCode == 404
+}
+
+// IsRateLimited returns true if the error is a 429 Too Many Requests
+func (e *APIError) IsRateLimited() bool {
+	return e.StatusCode == 429
+}
+
+// IsRetryable returns true if the error can be retried
+func (e *APIError) IsRetryable() bool {
+	// Retry on rate limits and 5xx errors
+	return e.IsRateLimited() || (e.StatusCode >= 500 && e.StatusCode < 600)
+}
+
+// API is a handle to an OVH API client with retry and rate limiting support
 type API struct {
-	client *ovh.Client
+	client        *ovh.Client
+	logger        *logrus.Logger
+	maxRetries    int
+	retryDelay    time.Duration
+	rateLimitWait time.Duration
+}
+
+// APIConfig holds configuration for the API client
+type APIConfig struct {
+	MaxRetries    int
+	RetryDelay    time.Duration
+	RateLimitWait time.Duration
+	Logger        *logrus.Logger
 }
 
 // Project is a go representation of a Cloud project
@@ -29,6 +95,18 @@ type Project struct {
 // Projects is a list of project IDs
 type Projects []string
 
+// Region represents an OVH cloud region
+type Region struct {
+	Name      string   `json:"name"`
+	Status    string   `json:"status"`
+	Type      string   `json:"type"`
+	Services  []string `json:"services,omitempty"`
+	Continent string   `json:"continent,omitempty"`
+}
+
+// Regions is a list of regions
+type Regions []Region
+
 // Flavor is a go representation of Cloud Flavor
 type Flavor struct {
 	Region      string `json:"region"`
@@ -39,6 +117,8 @@ type Flavor struct {
 	MemoryGB    int    `json:"ram"`
 	DiskSpaceGB int    `json:"disk"`
 	Type        string `json:"type"`
+	Available   bool   `json:"available"`
+	Quota       int    `json:"quota,omitempty"`
 }
 
 // Flavors is a list flavors
@@ -54,13 +134,12 @@ type Image struct {
 	Status       string `json:"status"`
 	MinDisk      int    `json:"minDisk"`
 	Visibility   string `json:"visibility"`
+	Size         float64  `json:"size,omitempty"`
+	PlanCode     string `json:"planCode,omitempty"`
 }
 
 // Images is a list of Images
 type Images []Image
-
-// Regions is a list of Cloud Region names
-type Regions []string
 
 // Network defines the private network names
 type Network struct {
@@ -69,29 +148,46 @@ type Network struct {
 	Type   string `json:"type"`
 	ID     string `json:"id"`
 	VlanID int    `json:"vlanid"`
+	Region string `json:"region,omitempty"`
 }
 
 // Networks is a list of Network
 type Networks []Network
 
-// SshkeyReq defines the fields for an SSH Key upload
-type SshkeyReq struct {
+// SSHKeyReq defines the fields for an SSH Key upload
+type SSHKeyReq struct {
 	Name      string `json:"name"`
 	PublicKey string `json:"publicKey"`
 	Region    string `json:"region,omitempty"`
 }
 
-// Sshkey is a go representation of Cloud SSH Key
-type Sshkey struct {
-	Name        string  `json:"name"`
-	ID          string  `json:"id"`
-	PublicKey   string  `json:"publicKey"`
-	Fingerprint string  `json:"fingerPrint"`
-	Regions     Regions `json:"region"`
+// SSHKey is a go representation of Cloud SSH Key
+type SSHKey struct {
+	Name        string   `json:"name"`
+	ID          string   `json:"id"`
+	PublicKey   string   `json:"publicKey"`
+	Fingerprint string   `json:"fingerPrint"`
+	Regions     []string `json:"region"`
 }
 
-// Sshkeys is a list of Sshkey
-type Sshkeys []Sshkey
+// SSHKeys is a list of SSHKey
+type SSHKeys []SSHKey
+
+// Legacy type aliases for backward compatibility
+type Sshkey = SSHKey
+type Sshkeys = SSHKeys
+type SshkeyReq = SSHKeyReq
+
+// Quota represents resource quotas for a region
+type Quota struct {
+	Region          string `json:"region"`
+	Instance        int    `json:"instance"`
+	Cores           int    `json:"cores"`
+	RAM             int    `json:"ram"`
+	KeyPairs        int    `json:"keypair"`
+	Volumes         int    `json:"volume"`
+	VolumeGigabytes int    `json:"volumeGigabytes"`
+}
 
 // IP is a go representation of a Cloud IP address
 type IP struct {
@@ -102,7 +198,7 @@ type IP struct {
 // IPs is a list of IPs
 type IPs []IP
 
-// NetworkParmas for Cloud instance
+// NetworkParam for Cloud instance
 type NetworkParam struct {
 	ID string `json:"networkId"`
 }
@@ -111,12 +207,13 @@ type NetworkParams []NetworkParam
 
 // InstanceReq defines the fields for a VM creation
 type InstanceReq struct {
+	UserData       string        `json:"userData,omitempty"`
 	Name           string        `json:"name"`
-	FlavorID       string        `json:"flavorID"`
-	ImageID        string        `json:"imageID"`
+	FlavorID       string        `json:"flavorId"`
+	ImageID        string        `json:"imageId"`
 	Region         string        `json:"region"`
 	NetworkParams  NetworkParams `json:"networks"`
-	SshkeyID       string        `json:"sshKeyID"`
+	SshkeyID       string        `json:"sshKeyId"`
 	MonthlyBilling bool          `json:"monthlyBilling"`
 }
 
@@ -130,9 +227,10 @@ type Instance struct {
 	NetworkParams  NetworkParams `json:"networks"`
 	Image          Image         `json:"image"`
 	Flavor         Flavor        `json:"flavor"`
-	Sshkey         Sshkey        `json:"sshKey"`
+	Sshkey         SSHKey        `json:"sshKey"`
 	IPAddresses    IPs           `json:"ipAddresses"`
 	MonthlyBilling bool          `json:"monthlyBilling"`
+	SecurityGroup  string        `json:"securityGroup,omitempty"`
 }
 
 // MKSClusterCreateReq defines the fields for OVH Managed Kubernetes cluster creation.
@@ -191,81 +289,438 @@ type RebootReq struct {
 	Type string `json:"type"`
 }
 
-// NewAPI instanciates a Cloud API driver from credentials, for a given endpoint. See github.com/ovh/go-ovh for more informations
-func NewAPI(endpoint, applicationKey, applicationSecret, consumerKey string) (api *API, err error) {
-	client, err := ovh.NewClient(endpoint, applicationKey, applicationSecret, consumerKey)
-	return &API{client}, err
+// NewAPI instantiates a Cloud API driver from credentials, for a given endpoint
+func NewAPI(endpoint, applicationKey, applicationSecret, consumerKey string) (*API, error) {
+	return NewAPIWithConfig(endpoint, applicationKey, applicationSecret, consumerKey, nil)
 }
 
-// GetProjects returns a list of string project ID
-func (a *API) GetProjects() (projects Projects, err error) {
-	err = a.client.Get("/cloud/project", &projects)
+// NewAPIWithConfig instantiates a Cloud API driver with custom configuration
+func NewAPIWithConfig(endpoint, applicationKey, applicationSecret, consumerKey string, config *APIConfig) (*API, error) {
+	client, err := ovh.NewClient(endpoint, applicationKey, applicationSecret, consumerKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OVH client: %w", err)
+	}
+
+	api := &API{
+		client:        client,
+		maxRetries:    defaultMaxRetries,
+		retryDelay:    defaultRetryDelay,
+		rateLimitWait: defaultRateLimitDelay,
+		logger:        logrus.New(),
+	}
+
+	if config != nil {
+		if config.MaxRetries > 0 {
+			api.maxRetries = config.MaxRetries
+		}
+		if config.RetryDelay > 0 {
+			api.retryDelay = config.RetryDelay
+		}
+		if config.RateLimitWait > 0 {
+			api.rateLimitWait = config.RateLimitWait
+		}
+		if config.Logger != nil {
+			api.logger = config.Logger
+		}
+	}
+
+	return api, nil
+}
+
+// doWithRetry executes an API call with retry logic and exponential backoff
+func (a *API) doWithRetry(ctx context.Context, operation string, resource string, fn func() error) error {
+	var lastErr error
+
+	for attempt := 0; attempt <= a.maxRetries; attempt++ {
+		// Check context before attempting
+		select {
+		case <-ctx.Done():
+			return &APIError{
+				Operation: operation,
+				Resource:  resource,
+				Message:   "context cancelled",
+				Err:       ctx.Err(),
+			}
+		default:
+		}
+
+		// Execute the function
+		err := fn()
+		if err == nil {
+			if attempt > 0 {
+				a.logger.WithFields(logrus.Fields{
+					"operation": operation,
+					"resource":  resource,
+					"attempts":  attempt + 1,
+				}).Debug("API call succeeded after retry")
+			}
+			return nil
+		}
+
+		// Wrap error if not already wrapped
+		apiErr, ok := err.(*APIError)
+		if !ok {
+			// Try to extract info from OVH API error
+			if ovhErr, ok := err.(*ovh.APIError); ok {
+				apiErr = &APIError{
+					Operation:  operation,
+					Resource:   resource,
+					StatusCode: ovhErr.Code,
+					OVHCode:    ovhErr.Code,
+					Message:    ovhErr.Message,
+					Err:        err,
+				}
+			} else {
+				apiErr = &APIError{
+					Operation: operation,
+					Resource:  resource,
+					Message:   err.Error(),
+					Err:       err,
+				}
+			}
+		}
+
+		lastErr = apiErr
+
+		// Don't retry on non-retryable errors
+		if !apiErr.IsRetryable() {
+			a.logger.WithFields(logrus.Fields{
+				"operation":   operation,
+				"resource":    resource,
+				"status_code": apiErr.StatusCode,
+				"error":       apiErr.Message,
+			}).Debug("Non-retryable error")
+			return apiErr
+		}
+
+		// Don't retry if we've exhausted attempts
+		if attempt >= a.maxRetries {
+			a.logger.WithFields(logrus.Fields{
+				"operation": operation,
+				"resource":  resource,
+				"attempts":  attempt + 1,
+				"error":     apiErr.Message,
+			}).Warn("Max retries exhausted")
+			return apiErr
+		}
+
+		// Calculate backoff delay (exponential with jitter)
+		backoff := time.Duration(math.Pow(2, float64(attempt))) * a.retryDelay
+		if backoff > defaultRetryMaxDelay {
+			backoff = defaultRetryMaxDelay
+		}
+
+		// Add rate limit wait if this was a rate limit error
+		if apiErr.IsRateLimited() {
+			backoff += a.rateLimitWait
+		}
+
+		a.logger.WithFields(logrus.Fields{
+			"operation": operation,
+			"resource":  resource,
+			"attempt":   attempt + 1,
+			"backoff":   backoff,
+			"error":     apiErr.Message,
+		}).Debug("Retrying after backoff")
+
+		// Wait for backoff period or context cancellation
+		select {
+		case <-ctx.Done():
+			return &APIError{
+				Operation: operation,
+				Resource:  resource,
+				Message:   "context cancelled during retry",
+				Err:       ctx.Err(),
+			}
+		case <-time.After(backoff):
+		}
+	}
+
+	return lastErr
+}
+
+// GetProjects returns a list of string project IDs
+func (a *API) GetProjects(ctx context.Context) (Projects, error) {
+	var projects Projects
+	err := a.doWithRetry(ctx, "GetProjects", "/cloud/project", func() error {
+		return a.client.GetWithContext(ctx, "/cloud/project", &projects)
+	})
 	return projects, err
 }
 
-// GetProject return the details of a project given a project id
-func (a *API) GetProject(projectID string) (project *Project, err error) {
-	err = a.client.Get("/cloud/project/"+projectID, &project)
-	return project, err
+// GetProject returns the details of a project given a project id
+func (a *API) GetProject(ctx context.Context, projectID string) (*Project, error) {
+	var project Project
+	resource := fmt.Sprintf("/cloud/project/%s", projectID)
+	err := a.doWithRetry(ctx, "GetProject", resource, func() error {
+		return a.client.GetWithContext(ctx, resource, &project)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &project, nil
 }
 
-// GetProjectByName returns the details of a project given its name. This is slower than GetProject
-func (a *API) GetProjectByName(projectName string) (project *Project, err error) {
-	// get project list
-	projects, err := a.GetProjects()
+// GetProjectByName returns the details of a project given its name
+func (a *API) GetProjectByName(ctx context.Context, projectName string) (*Project, error) {
+	projects, err := a.GetProjects(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// If projectName is a valid projectID return it.
+	// If projectName is a valid projectID return it
 	for _, projectID := range projects {
 		if projectID == projectName {
-			return a.GetProject(projectID)
+			return a.GetProject(ctx, projectID)
 		}
 	}
 
-	// Attempt to find a project matching projectName. This is potentially slow
+	// Attempt to find a project matching projectName
 	for _, projectID := range projects {
-		project, err := a.GetProject(projectID)
+		project, err := a.GetProject(ctx, projectID)
 		if err != nil {
 			return nil, err
 		}
-
 		if project.Name == projectName {
 			return project, nil
 		}
 	}
 
-	// Ooops
-	return nil, fmt.Errorf("Project '%s' does not exist on OVH cloud. To create or rename a project, please visit %s", projectName, CustomerInterface)
+	return nil, &APIError{
+		Operation: "GetProjectByName",
+		Resource:  projectName,
+		Message:   fmt.Sprintf("Project '%s' does not exist. Visit %s to create or rename a project", projectName, CustomerInterface),
+	}
+}
+
+// ListRegions returns the list of available regions for a given project
+func (a *API) ListRegions(ctx context.Context, projectID string) (Regions, error) {
+	var regions Regions
+	resource := fmt.Sprintf("/cloud/project/%s/region", projectID)
+	err := a.doWithRetry(ctx, "ListRegions", resource, func() error {
+		return a.client.GetWithContext(ctx, resource, &regions)
+	})
+	return regions, err
+}
+
+// GetRegions returns the list of valid region names for a given project (legacy method)
+func (a *API) GetRegions(ctx context.Context, projectID string) ([]string, error) {
+	regions, err := a.ListRegions(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, len(regions))
+	for i, r := range regions {
+		names[i] = r.Name
+	}
+	return names, nil
+}
+
+// ListFlavors returns the list of available flavors for a given project in a given region
+func (a *API) ListFlavors(ctx context.Context, projectID, region string) (Flavors, error) {
+	var flavors Flavors
+	resource := fmt.Sprintf("/cloud/project/%s/flavor?region=%s", projectID, region)
+	err := a.doWithRetry(ctx, "ListFlavors", resource, func() error {
+		return a.client.GetWithContext(ctx, resource, &flavors)
+	})
+	return flavors, err
+}
+
+// GetFlavors returns the list of available flavors for a given project in a given region (legacy method)
+func (a *API) GetFlavors(ctx context.Context, projectID, region string) (Flavors, error) {
+	return a.ListFlavors(ctx, projectID, region)
+}
+
+// GetFlavorByName returns the details of a flavor given its name
+func (a *API) GetFlavorByName(ctx context.Context, projectID, region, flavorName string) (*Flavor, error) {
+	flavors, err := a.ListFlavors(ctx, projectID, region)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find first matching Linux flavor
+	for _, flavor := range flavors {
+		if flavor.OS != "linux" {
+			continue
+		}
+		if flavor.ID == flavorName || flavor.Name == flavorName {
+			return &flavor, nil
+		}
+	}
+
+	return nil, &APIError{
+		Operation: "GetFlavorByName",
+		Resource:  fmt.Sprintf("%s/%s", region, flavorName),
+		Message:   fmt.Sprintf("Flavor '%s' does not exist in region %s. Visit %s for available flavors", flavorName, region, CustomerInterface),
+	}
+}
+
+// ListImages returns a list of images for a given project in a given region
+func (a *API) ListImages(ctx context.Context, projectID, region string) (Images, error) {
+	var images Images
+	resource := fmt.Sprintf("/cloud/project/%s/image?osType=linux&region=%s", projectID, region)
+	err := a.doWithRetry(ctx, "ListImages", resource, func() error {
+		return a.client.GetWithContext(ctx, resource, &images)
+	})
+	return images, err
+}
+
+// GetImages returns a list of images for a given project in a given region (legacy method)
+func (a *API) GetImages(ctx context.Context, projectID, region string) (Images, error) {
+	return a.ListImages(ctx, projectID, region)
+}
+
+// GetImageByName returns the details of an image given its name, a project and a region
+func (a *API) GetImageByName(ctx context.Context, projectID, region, imageName string) (*Image, error) {
+	images, err := a.ListImages(ctx, projectID, region)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find first matching image
+	for _, image := range images {
+		if image.OS != "linux" {
+			continue
+		}
+		if image.ID == imageName || image.Name == imageName {
+			return &image, nil
+		}
+	}
+
+	return nil, &APIError{
+		Operation: "GetImageByName",
+		Resource:  fmt.Sprintf("%s/%s", region, imageName),
+		Message:   fmt.Sprintf("Image '%s' does not exist in region %s. Visit %s for available images", imageName, region, CustomerInterface),
+	}
+}
+
+// ListSSHKeys returns a list of SSH keys for a given project in a given region
+func (a *API) ListSSHKeys(ctx context.Context, projectID, region string) (SSHKeys, error) {
+	var sshkeys SSHKeys
+	resource := fmt.Sprintf("/cloud/project/%s/sshkey?region=%s", projectID, region)
+	err := a.doWithRetry(ctx, "ListSSHKeys", resource, func() error {
+		return a.client.GetWithContext(ctx, resource, &sshkeys)
+	})
+	return sshkeys, err
+}
+
+// GetSshkeys returns a list of SSH keys for a given project in a given region (legacy method)
+func (a *API) GetSshkeys(ctx context.Context, projectID, region string) (SSHKeys, error) {
+	return a.ListSSHKeys(ctx, projectID, region)
+}
+
+// GetSshkeyByName returns the details of an SSH key given its name in a given region
+func (a *API) GetSshkeyByName(ctx context.Context, projectID, region, sshKeyName string) (*SSHKey, error) {
+	sshkeys, err := a.ListSSHKeys(ctx, projectID, region)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find first matching SSH key
+	for _, sshkey := range sshkeys {
+		if sshkey.ID == sshKeyName || sshkey.Name == sshKeyName {
+			return &sshkey, nil
+		}
+	}
+
+	return nil, &APIError{
+		Operation: "GetSshkeyByName",
+		Resource:  fmt.Sprintf("%s/%s", region, sshKeyName),
+		Message:   fmt.Sprintf("SSH key '%s' does not exist in region %s. Visit %s for available SSH keys", sshKeyName, region, CustomerInterface),
+	}
+}
+
+// CreateSSHKey uploads a new public key with name and returns resulting object
+func (a *API) CreateSSHKey(ctx context.Context, projectID, name, publicKey string) (*SSHKey, error) {
+	var sshkey SSHKey
+	req := SSHKeyReq{
+		Name:      name,
+		PublicKey: publicKey,
+	}
+	resource := fmt.Sprintf("/cloud/project/%s/sshkey", projectID)
+	err := a.doWithRetry(ctx, "CreateSSHKey", resource, func() error {
+		return a.client.PostWithContext(ctx, resource, req, &sshkey)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &sshkey, nil
+}
+
+// CreateSshkey uploads a new public key with name and returns resulting object (legacy method)
+func (a *API) CreateSshkey(ctx context.Context, projectID, name, pubkey string) (*SSHKey, error) {
+	return a.CreateSSHKey(ctx, projectID, name, pubkey)
+}
+
+// DeleteSshkey deletes an existing SSH key
+func (a *API) DeleteSshkey(ctx context.Context, projectID, keyID string) error {
+	resource := fmt.Sprintf("/cloud/project/%s/sshkey/%s", projectID, keyID)
+	err := a.doWithRetry(ctx, "DeleteSshkey", resource, func() error {
+		return a.client.DeleteWithContext(ctx, resource, nil)
+	})
+	// Ignore 404 errors
+	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+		return nil
+	}
+	return err
+}
+
+// GetQuotas returns resource quotas for a given project in a region
+func (a *API) GetQuotas(ctx context.Context, projectID, region string) (*Quota, error) {
+	var quota Quota
+	resource := fmt.Sprintf("/cloud/project/%s/quota?region=%s", projectID, region)
+	err := a.doWithRetry(ctx, "GetQuotas", resource, func() error {
+		var quotas []Quota
+		if err := a.client.GetWithContext(ctx, resource, &quotas); err != nil {
+			return err
+		}
+		if len(quotas) == 0 {
+			return fmt.Errorf("no quota information available for region %s", region)
+		}
+		quota = quotas[0]
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &quota, nil
 }
 
 // GetNetworks returns public & private networks for a given project
-func (a *API) GetNetworks(projectID string, privateNet bool) (networks Networks, err error) {
-	// if network type is true lets get the private network
+func (a *API) GetNetworks(ctx context.Context, projectID string, privateNet bool) (Networks, error) {
+	var networks Networks
 	var url string
-	if privateNet == true {
+	if privateNet {
 		url = fmt.Sprintf("/cloud/project/%s/network/private", projectID)
 	} else {
 		url = fmt.Sprintf("/cloud/project/%s/network/public", projectID)
 	}
-	err = a.client.Get(url, &networks)
+	err := a.doWithRetry(ctx, "GetNetworks", url, func() error {
+		return a.client.GetWithContext(ctx, url, &networks)
+	})
 	return networks, err
 }
 
 // GetPublicNetworkID returns the public network id for a given project
-func (a *API) GetPublicNetworkID(projectID string) (publicID string, err error) {
-	networks, err := a.GetNetworks(projectID, false)
+func (a *API) GetPublicNetworkID(ctx context.Context, projectID string) (string, error) {
+	networks, err := a.GetNetworks(ctx, projectID, false)
 	if err != nil {
 		return "", err
+	}
+	if len(networks) == 0 {
+		return "", &APIError{
+			Operation: "GetPublicNetworkID",
+			Resource:  projectID,
+			Message:   "no public network found",
+		}
 	}
 	return networks[0].ID, nil
 }
 
-// GetNetworksByName returns the details of a network given its name & project
-func (a *API) GetPrivateNetworkByName(projectID, networkName string) (network *Network, err error) {
-	// Get image list
-	networks, err := a.GetNetworks(projectID, true)
+// GetPrivateNetworkByName returns the details of a network given its name & project
+func (a *API) GetPrivateNetworkByName(ctx context.Context, projectID, networkName string) (*Network, error) {
+	networks, err := a.GetNetworks(ctx, projectID, true)
 	if err != nil {
 		return nil, err
 	}
@@ -282,237 +737,322 @@ func (a *API) GetPrivateNetworkByName(projectID, networkName string) (network *N
 		networkNames = append(networkNames, network.Name)
 	}
 
-	return nil, fmt.Errorf("Invalid private network %s. List of valid private networks include %s", networkName, strings.Join(networkNames[:], ", "))
-}
-
-// GetRegions returns the list of valid regions for a given project
-func (a *API) GetRegions(projectID string) (regions Regions, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/region", projectID)
-	err = a.client.Get(url, &regions)
-	return regions, err
-}
-
-// GetFlavors returns the list of available flavors for a given project in a giver zone
-func (a *API) GetFlavors(projectID, region string) (flavors Flavors, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/flavor?region=%s", projectID, region)
-	err = a.client.Get(url, &flavors)
-	return flavors, err
-}
-
-// GetFlavorByName returns the details of a flavor given its name. Slower than getting by id
-func (a *API) GetFlavorByName(projectID, region, flavorName string) (flavor *Flavor, err error) {
-	// Get flavor list
-	flavors, err := a.GetFlavors(projectID, region)
-	if err != nil {
-		return nil, err
+	return nil, &APIError{
+		Operation: "GetPrivateNetworkByName",
+		Resource:  networkName,
+		Message:   fmt.Sprintf("Invalid private network %s. Available networks: %s", networkName, strings.Join(networkNames, ", ")),
 	}
+}
 
-	// Find first matching Linux flavor
-	for _, flavor := range flavors {
-		if flavor.OS != "linux" {
-			continue
-		}
-
-		if flavor.ID == flavorName || flavor.Name == flavorName {
-			return &flavor, nil
-		}
+// CreateInstance starts a new public cloud instance and returns resulting object
+func (a *API) CreateInstance(ctx context.Context, projectID, name, pubkeyID, flavorID, imageID, region, userData string, networkIDs []string, monthlyBilling bool) (*Instance, error) {
+	var instance Instance
+	req := InstanceReq{
+		UserData:       userData,
+		Name:           name,
+		SshkeyID:       pubkeyID,
+		FlavorID:       flavorID,
+		ImageID:        imageID,
+		Region:         region,
+		MonthlyBilling: monthlyBilling,
 	}
-
-	// Ooops
-	return nil, fmt.Errorf("Flavor '%s' does not exist on OVH cloud. To find a list of available flavors, please visit %s", flavorName, CustomerInterface)
-}
-
-// GetImages returns a list of images for a given project in a given region
-func (a *API) GetImages(projectID, region string) (images Images, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/image?osType=linux&region=%s", projectID, region)
-	err = a.client.Get(url, &images)
-	return images, err
-}
-
-// GetImageByName returns the details of an image given its name, a project and a region. This is slower than id access
-func (a *API) GetImageByName(projectID, region, imageName string) (image *Image, err error) {
-	// Get image list
-	images, err := a.GetImages(projectID, region)
-	if err != nil {
-		return nil, err
-	}
-
-	// Find first matching image
-	for _, image := range images {
-		if image.OS != "linux" {
-			continue
-		}
-
-		if image.ID == imageName || image.Name == imageName {
-			return &image, nil
-		}
-	}
-
-	// Ooops
-	return nil, fmt.Errorf("Image '%s' does not exist on OVH cloud. To find a list of available images, please visit %s", imageName, CustomerInterface)
-}
-
-// GetSshkeys returns a list of sshkeys for a given project in a given region
-func (a *API) GetSshkeys(projectID, region string) (sshkeys Sshkeys, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/sshkey?region=%s", projectID, region)
-	err = a.client.Get(url, &sshkeys)
-	return sshkeys, err
-}
-
-// GetSshkeyByName returns the details of an ssh key given its name in a given region. This is slower than id access
-func (a *API) GetSshkeyByName(projectID, region, sshKeyName string) (sshkey *Sshkey, err error) {
-	// Get sshkey list
-	sshkeys, err := a.GetSshkeys(projectID, region)
-	if err != nil {
-		return nil, err
-	}
-
-	// Find first matching sshkey
-	for _, sshkey := range sshkeys {
-		if sshkey.ID == sshKeyName || sshkey.Name == sshKeyName {
-			return &sshkey, nil
-		}
-	}
-
-	// Ooops
-	return nil, fmt.Errorf("SSH key '%s' does not exist on OVH cloud. To find a list of available ssh keys, please visit %s", sshKeyName, CustomerInterface)
-}
-
-// CreateSshkey uploads a new public key with name and returns resulting object
-func (a *API) CreateSshkey(projectID, name, pubkey string) (sshkey *Sshkey, err error) {
-	var sshkeyreq SshkeyReq
-	sshkeyreq.Name = name
-	sshkeyreq.PublicKey = pubkey
-
-	url := fmt.Sprintf("/cloud/project/%s/sshkey", projectID)
-	err = a.client.Post(url, sshkeyreq, &sshkey)
-	return sshkey, err
-}
-
-// DeleteSshkey deletes an existing sshkey
-func (a *API) DeleteSshkey(projectID, instanceID string) (err error) {
-	url := fmt.Sprintf("/cloud/project/%s/sshkey/%s", projectID, instanceID)
-	err = a.client.Delete(url, nil)
-	if apierror, ok := err.(*ovh.APIError); ok && apierror.Code == 404 {
-		err = nil
-	}
-	return err
-}
-
-// CreateInstance start a new public cloud instance and returns resulting object
-func (a *API) CreateInstance(projectID, name, pubkeyID, flavorID, ImageID, region string, networkIDs []string, monthlyBilling bool) (instance *Instance, err error) {
-	var instanceReq InstanceReq
-	instanceReq.Name = name
-	instanceReq.SshkeyID = pubkeyID
-	instanceReq.FlavorID = flavorID
-	instanceReq.ImageID = ImageID
-	instanceReq.Region = region
-	instanceReq.MonthlyBilling = monthlyBilling
 
 	for _, v := range networkIDs {
-		networkParam := NetworkParam{ID: v}
-		instanceReq.NetworkParams = append(instanceReq.NetworkParams, networkParam)
+		req.NetworkParams = append(req.NetworkParams, NetworkParam{ID: v})
 	}
 
-	url := fmt.Sprintf("/cloud/project/%s/instance", projectID)
-	err = a.client.Post(url, instanceReq, &instance)
-	return instance, err
-}
-
-// RebootInstance reboot an instance
-func (a *API) RebootInstance(projectID, instanceID string, hard bool) (err error) {
-	var rebootReq RebootReq
-	if hard == true {
-		rebootReq.Type = "hard"
-	} else {
-		rebootReq.Type = "soft"
+	resource := fmt.Sprintf("/cloud/project/%s/instance", projectID)
+	err := a.doWithRetry(ctx, "CreateInstance", resource, func() error {
+		return a.client.PostWithContext(ctx, resource, req, &instance)
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	url := fmt.Sprintf("/cloud/project/%s/instance/%s/reboot", projectID, instanceID)
-	err = a.client.Post(url, rebootReq, nil)
-	return err
+	return &instance, nil
 }
 
-// DeleteInstance stops and destroys a public cloud instance
-func (a *API) DeleteInstance(projectID, instanceID string) (err error) {
-	url := fmt.Sprintf("/cloud/project/%s/instance/%s", projectID, instanceID)
-	err = a.client.Delete(url, nil)
-	if apierror, ok := err.(*ovh.APIError); ok && apierror.Code == 404 {
-		err = nil
+// GetInstance finds a VM instance given an ID
+func (a *API) GetInstance(ctx context.Context, projectID, instanceID string) (*Instance, error) {
+	var instance Instance
+	resource := fmt.Sprintf("/cloud/project/%s/instance/%s", projectID, instanceID)
+	err := a.doWithRetry(ctx, "GetInstance", resource, func() error {
+		return a.client.GetWithContext(ctx, resource, &instance)
+	})
+	if err != nil {
+		return nil, err
 	}
-	return err
-}
-
-// GetInstance finds a VM instance given a name or an ID
-func (a *API) GetInstance(projectID, instanceID string) (instance *Instance, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/instance/%s", projectID, instanceID)
-	err = a.client.Get(url, &instance)
-	return instance, err
+	return &instance, nil
 }
 
 // StartInstance powers on a stopped instance
-func (a *API) StartInstance(projectID, instanceID string) (err error) {
-	url := fmt.Sprintf("/cloud/project/%s/instance/%s/start", projectID, instanceID)
-	err = a.client.Post(url, nil, nil)
-	return err
+func (a *API) StartInstance(ctx context.Context, projectID, instanceID string) error {
+	resource := fmt.Sprintf("/cloud/project/%s/instance/%s/start", projectID, instanceID)
+	return a.doWithRetry(ctx, "StartInstance", resource, func() error {
+		return a.client.PostWithContext(ctx, resource, nil, nil)
+	})
 }
 
 // StopInstance powers off a running instance
-func (a *API) StopInstance(projectID, instanceID string) (err error) {
-	url := fmt.Sprintf("/cloud/project/%s/instance/%s/stop", projectID, instanceID)
-	err = a.client.Post(url, nil, nil)
-	return err
+func (a *API) StopInstance(ctx context.Context, projectID, instanceID string) error {
+	resource := fmt.Sprintf("/cloud/project/%s/instance/%s/stop", projectID, instanceID)
+	return a.doWithRetry(ctx, "StopInstance", resource, func() error {
+		return a.client.PostWithContext(ctx, resource, nil, nil)
+	})
 }
 
-// ListMKSClusters returns managed kubernetes clusters in a given project.
-func (a *API) ListMKSClusters(projectID string) (clusters MKSClusters, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/kube", projectID)
-	err = a.client.Get(url, &clusters)
-	return clusters, err
+// RebootInstance reboots an instance
+func (a *API) RebootInstance(ctx context.Context, projectID, instanceID string, hard bool) error {
+	rebootType := "soft"
+	if hard {
+		rebootType = "hard"
+	}
+	req := RebootReq{Type: rebootType}
+	resource := fmt.Sprintf("/cloud/project/%s/instance/%s/reboot", projectID, instanceID)
+	return a.doWithRetry(ctx, "RebootInstance", resource, func() error {
+		return a.client.PostWithContext(ctx, resource, req, nil)
+	})
 }
 
-// CreateMKSCluster creates a managed kubernetes cluster.
-func (a *API) CreateMKSCluster(projectID string, req MKSClusterCreateReq) (cluster *MKSCluster, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/kube", projectID)
-	err = a.client.Post(url, req, &cluster)
-	return cluster, err
-}
-
-// GetMKSCluster gets a managed kubernetes cluster by ID.
-func (a *API) GetMKSCluster(projectID, clusterID string) (cluster *MKSCluster, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/kube/%s", projectID, clusterID)
-	err = a.client.Get(url, &cluster)
-	return cluster, err
-}
-
-// DeleteMKSCluster deletes a managed kubernetes cluster.
-func (a *API) DeleteMKSCluster(projectID, clusterID string) (err error) {
-	url := fmt.Sprintf("/cloud/project/%s/kube/%s", projectID, clusterID)
-	err = a.client.Delete(url, nil)
-	if apierror, ok := err.(*ovh.APIError); ok && apierror.Code == 404 {
-		err = nil
+// DeleteInstance stops and destroys a public cloud instance
+func (a *API) DeleteInstance(ctx context.Context, projectID, instanceID string) error {
+	resource := fmt.Sprintf("/cloud/project/%s/instance/%s", projectID, instanceID)
+	err := a.doWithRetry(ctx, "DeleteInstance", resource, func() error {
+		return a.client.DeleteWithContext(ctx, resource, nil)
+	})
+	// Ignore 404 errors
+	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+		return nil
 	}
 	return err
 }
 
-// ListMKSNodePools lists nodepools in a managed kubernetes cluster.
-func (a *API) ListMKSNodePools(projectID, clusterID string) (nodePools []MKSNodePool, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool", projectID, clusterID)
-	err = a.client.Get(url, &nodePools)
-	return nodePools, err
+// ListMKSClusters returns managed kubernetes clusters in a given project
+func (a *API) ListMKSClusters(ctx context.Context, projectID string) (MKSClusters, error) {
+	var clusters MKSClusters
+	resource := fmt.Sprintf("/cloud/project/%s/kube", projectID)
+	err := a.doWithRetry(ctx, "ListMKSClusters", resource, func() error {
+		return a.client.GetWithContext(ctx, resource, &clusters)
+	})
+	return clusters, err
 }
 
-// CreateMKSNodePool creates a nodepool in a managed kubernetes cluster.
-func (a *API) CreateMKSNodePool(projectID, clusterID string, req MKSNodePoolCreateReq) (nodePool *MKSNodePool, err error) {
-	url := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool", projectID, clusterID)
-	err = a.client.Post(url, req, &nodePool)
-	return nodePool, err
+// CreateMKSCluster creates a managed kubernetes cluster
+func (a *API) CreateMKSCluster(ctx context.Context, projectID string, req MKSClusterCreateReq) (*MKSCluster, error) {
+	var cluster MKSCluster
+	resource := fmt.Sprintf("/cloud/project/%s/kube", projectID)
+	err := a.doWithRetry(ctx, "CreateMKSCluster", resource, func() error {
+		return a.client.PostWithContext(ctx, resource, req, &cluster)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &cluster, nil
 }
 
-// ScaleMKSNodePool updates desired node count in a managed kubernetes nodepool.
-func (a *API) ScaleMKSNodePool(projectID, clusterID, nodePoolID string, desiredNodes int) (err error) {
-	url := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool/%s", projectID, clusterID, nodePoolID)
-	req := MKSNodePoolScaleReq{DesiredNodes: desiredNodes}
-	err = a.client.Put(url, req, nil)
+// DeleteMKSCluster deletes a managed kubernetes cluster
+func (a *API) DeleteMKSCluster(ctx context.Context, projectID, clusterID string) error {
+	resource := fmt.Sprintf("/cloud/project/%s/kube/%s", projectID, clusterID)
+	err := a.doWithRetry(ctx, "DeleteMKSCluster", resource, func() error {
+		return a.client.DeleteWithContext(ctx, resource, nil)
+	})
+	// Ignore 404 errors
+	if apiErr, ok := err.(*APIError); ok && apiErr.IsNotFound() {
+		return nil
+	}
 	return err
+}
+
+// CreateMKSNodePool creates a nodepool in a managed kubernetes cluster
+func (a *API) CreateMKSNodePool(ctx context.Context, projectID, clusterID string, req MKSNodePoolCreateReq) (*MKSNodePool, error) {
+	var nodePool MKSNodePool
+	resource := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool", projectID, clusterID)
+	err := a.doWithRetry(ctx, "CreateMKSNodePool", resource, func() error {
+		return a.client.PostWithContext(ctx, resource, req, &nodePool)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &nodePool, nil
+}
+
+// ScaleMKSNodePool updates desired node count in a managed kubernetes nodepool
+func (a *API) ScaleMKSNodePool(ctx context.Context, projectID, clusterID, nodePoolID string, desiredNodes int) error {
+	req := MKSNodePoolScaleReq{DesiredNodes: desiredNodes}
+	resource := fmt.Sprintf("/cloud/project/%s/kube/%s/nodepool/%s", projectID, clusterID, nodePoolID)
+	return a.doWithRetry(ctx, "ScaleMKSNodePool", resource, func() error {
+		return a.client.PutWithContext(ctx, resource, req, nil)
+	})
+}
+
+
+// OpenStackSecurityGroupManager handles security group attachment via OpenStack
+type OpenStackSecurityGroupManager struct {
+	AuthURL   string
+	Username  string
+	Password  string
+	ProjectID string
+	Region    string
+}
+
+// AttachSecurityGroupToInstance attaches a security group to an OVH instance using OpenStack API
+func AttachSecurityGroupToInstance(authURL, username, password, projectID, region, instanceID, securityGroupName string) error {
+	if securityGroupName == "" || securityGroupName == "default" {
+		return nil // No custom security group to attach
+	}
+
+	// Get OpenStack token
+	token, err := getOpenStackToken(authURL, username, password, projectID)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate with OpenStack: %w", err)
+	}
+
+	// Find security group ID
+	sgID, err := findSecurityGroupID(authURL, token, securityGroupName)
+	if err != nil {
+		return fmt.Errorf("failed to find security group: %w", err)
+	}
+
+	// Find instance ports and attach security group
+	neutronURL := fmt.Sprintf("https://network.%s.cloud.ovh.us/", region)
+	if err := attachSGToInstancePorts(neutronURL, token, instanceID, sgID); err != nil {
+		return fmt.Errorf("failed to attach security group to instance: %w", err)
+	}
+
+	return nil
+}
+
+func getOpenStackToken(authURL, username, password, projectID string) (string, error) {
+	authBody := map[string]interface{}{
+		"auth": map[string]interface{}{
+			"identity": map[string]interface{}{
+				"methods": []string{"password"},
+				"password": map[string]interface{}{
+					"user": map[string]interface{}{
+						"name":     username,
+						"domain":   map[string]string{"id": "default"},
+						"password": password,
+					},
+				},
+			},
+			"scope": map[string]interface{}{
+				"project": map[string]interface{}{
+					"id": projectID,
+				},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(authBody)
+	resp, err := http.Post(authURL+"/auth/tokens", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		respBody, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("auth failed: %s", string(respBody))
+	}
+
+	return resp.Header.Get("X-Subject-Token"), nil
+}
+
+func findSecurityGroupID(authURL, token, sgName string) (string, error) {
+	// Extract region from authURL for Neutron endpoint
+	region := "us-east-va-1" // Default fallback
+	if strings.Contains(authURL, "us-east") {
+		region = "us-east-va-1"
+	}
+
+	neutronURL := fmt.Sprintf("https://network.%s.cloud.ovh.us/v2.0/security-groups?name=%s", region, sgName)
+
+	req, _ := http.NewRequest("GET", neutronURL, nil)
+	req.Header.Set("X-Auth-Token", token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("failed to list security groups: %s", string(body))
+	}
+
+	var result struct {
+		SecurityGroups []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"security_groups"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	for _, sg := range result.SecurityGroups {
+		if sg.Name == sgName {
+			return sg.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("security group %s not found", sgName)
+}
+
+func attachSGToInstancePorts(neutronBaseURL, token, instanceID, sgID string) error {
+	// List ports for this instance
+	portsURL := fmt.Sprintf("%s/v2.0/ports?device_id=%s", neutronBaseURL, instanceID)
+
+	req, _ := http.NewRequest("GET", portsURL, nil)
+	req.Header.Set("X-Auth-Token", token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("failed to list ports: %s", string(body))
+	}
+
+	var result struct {
+		Ports []struct {
+			ID string `json:"id"`
+		} `json:"ports"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+
+	// Update each port with the security group
+	for _, port := range result.Ports {
+		updateURL := fmt.Sprintf("%s/v2.0/ports/%s", neutronBaseURL, port.ID)
+		updateBody := map[string]interface{}{
+			"port": map[string]interface{}{
+				"security_groups": []string{sgID},
+			},
+		}
+
+		body, _ := json.Marshal(updateBody)
+		req, _ := http.NewRequest("PUT", updateURL, bytes.NewBuffer(body))
+		req.Header.Set("X-Auth-Token", token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to update port %s: %w", port.ID, err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			body, _ := ioutil.ReadAll(resp.Body)
+			return fmt.Errorf("failed to update port %s: %s", port.ID, string(body))
+		}
+	}
+
+	return nil
 }
