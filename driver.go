@@ -791,20 +791,26 @@ func (d *Driver) disableIPv6() error {
 	// Wait a moment for SSH to be ready
 	time.Sleep(5 * time.Second)
 
-	// Commands to disable IPv6
+	// Commands to completely remove IPv6 from the system
+	// We must remove IPv6 addresses from interfaces so Rancher doesn't pick them up
 	commands := []string{
-		// Disable IPv6 via sysctl
+		// Disable IPv6 via sysctl (kernel level)
 		"sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1",
 		"sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1",
 		// Make it persistent
 		"echo 'net.ipv6.conf.all.disable_ipv6=1' | sudo tee -a /etc/sysctl.conf",
 		"echo 'net.ipv6.conf.default.disable_ipv6=1' | sudo tee -a /etc/sysctl.conf",
+		// Remove ALL IPv6 addresses from interfaces (critical for Rancher to see only IPv4)
+		"for iface in $(ip -6 addr show | grep -oP '(?<=\\d: )[^:]+(?=:)' | sort -u); do for addr in $(ip -6 addr show dev $iface | grep -oP '(?<=inet6 )[^/]+'); do sudo ip -6 addr del $addr dev $iface 2>/dev/null || true; done; done",
+		// Disable IPv6 on all current interfaces
+		"for iface in $(ls /sys/class/net/); do sudo sysctl -w net.ipv6.conf.$iface.disable_ipv6=1 2>/dev/null || true; done",
 	}
 
 	// Run each command via SSH
 	for _, cmd := range commands {
 		if _, err := drivers.RunSSHCommandFromDriver(d, cmd); err != nil {
-			return fmt.Errorf("failed to run '%s': %w", cmd, err)
+			// Log but don't fail - some commands may fail on certain systems
+			log.Warnf("IPv6 disable command warning: %v (command: %s)", err, cmd)
 		}
 	}
 
