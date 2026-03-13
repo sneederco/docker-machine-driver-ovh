@@ -813,6 +813,58 @@ func (a *API) RebootInstance(ctx context.Context, projectID, instanceID string, 
 	})
 }
 
+// ResizeInstance changes the flavor (size) of an instance.
+// The instance must be stopped before resizing. After resize, it will be started automatically.
+// The new flavor must be in the same family (e.g., b2-7 → b2-15).
+func (a *API) ResizeInstance(ctx context.Context, projectID, instanceID, newFlavorID string) (*Instance, error) {
+	var instance Instance
+	req := struct {
+		FlavorID string `json:"flavorId"`
+	}{FlavorID: newFlavorID}
+	resource := fmt.Sprintf("/cloud/project/%s/instance/%s/resize", projectID, instanceID)
+	err := a.doWithRetry(ctx, "ResizeInstance", resource, func() error {
+		return a.client.PostWithContext(ctx, resource, req, &instance)
+	})
+	return &instance, err
+}
+
+// GetResizableFlavors returns flavors that an instance can be resized to.
+// This checks the current instance's flavor family and returns compatible targets.
+func (a *API) GetResizableFlavors(ctx context.Context, projectID, region, currentFlavorName string) (Flavors, error) {
+	allFlavors, err := a.ListFlavors(ctx, projectID, region)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract flavor family (e.g., "b2" from "b2-7")
+	family := extractFlavorFamily(currentFlavorName)
+	if family == "" {
+		return nil, &APIError{
+			Operation: "GetResizableFlavors",
+			Resource:  currentFlavorName,
+			Message:   "Could not determine flavor family",
+		}
+	}
+
+	var resizable Flavors
+	for _, f := range allFlavors {
+		if extractFlavorFamily(f.Name) == family && f.Name != currentFlavorName && f.Available {
+			resizable = append(resizable, f)
+		}
+	}
+	return resizable, nil
+}
+
+// extractFlavorFamily extracts the family prefix from a flavor name.
+// e.g., "b2-7" → "b2", "c2-30" → "c2", "b3-8" → "b3"
+func extractFlavorFamily(flavorName string) string {
+	parts := strings.Split(flavorName, "-")
+	if len(parts) >= 2 {
+		return parts[0]
+	}
+	return ""
+}
+
 // DeleteInstance stops and destroys a public cloud instance
 func (a *API) DeleteInstance(ctx context.Context, projectID, instanceID string) error {
 	resource := fmt.Sprintf("/cloud/project/%s/instance/%s", projectID, instanceID)
