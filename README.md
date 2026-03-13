@@ -204,8 +204,8 @@ This driver can be registered with Rancher as a node driver for provisioning OVH
 1. In Rancher, go to **Cluster Management** → **Drivers** → **Node Drivers**
 2. Click **Add Node Driver**
 3. Enter:
-   - **Download URL**: `https://github.com/sneederco/docker-machine-driver-ovh/releases/download/v1.0.13/docker-machine-driver-ovh-linux-amd64`
-   - **Checksum**: `ce301801d90c6304fbddea0e3cdac02c16148d8b8aebeb5fb8056ccbda943021`
+   - **Download URL**: `https://github.com/sneederco/docker-machine-driver-ovh/releases/download/v1.0.14/docker-machine-driver-ovh`
+   - **Checksum**: `fa8fcf85552cfc122b8576c5b65966d942afc6f9d7b96b79e0e5c92412f65acb`
    - **UI Driver URL**: `https://github.com/sneederco/ui-driver-ovh/releases/download/v0.1.0/component.js`
 
 ### Multi-Node Clusters (IPv6 Fix)
@@ -219,6 +219,57 @@ waiting for probes: etcd, kube-apiserver, kube-controller-manager, kube-schedule
 ```
 
 The driver now automatically removes IPv6 addresses from instances, ensuring RKE2 uses IPv4 for all cluster communication.
+
+### Cloud-Init Wait (v1.0.14+)
+
+**v1.0.14** adds a cloud-init completion check before handing off to Rancher bootstrap. This ensures the system is fully initialized before the RKE2 installation begins, reducing bootstrap failures.
+
+### Autoscaling Best Practices
+
+When using cluster autoscaling with control-plane node pools:
+
+#### etcd Quorum Considerations
+
+etcd works best with odd numbers of members (1, 3, 5, 7). When autoscaling control-plane pools:
+
+| Pool Size | etcd Members | Recommendation |
+|-----------|--------------|----------------|
+| 1 | 1 | ✅ Single node, no HA |
+| 3 | 3 | ✅ Ideal for HA |
+| 5 | 5 | ✅ High availability |
+| 2, 4, 6 | Even | ⚠️ Works but not optimal |
+
+**Recommendation**: Set autoscaler min/max to odd numbers (1-3, 1-5, 3-5) for control-plane pools.
+
+#### Worker-Only Pools for Unlimited Scaling
+
+For workloads requiring more than 5 nodes, use separate worker-only pools:
+
+```yaml
+# Control-plane pool (limited scaling)
+- name: control-plane
+  roles: [controlplane, etcd, worker]
+  quantity: 3
+  autoscaler:
+    min: 3
+    max: 5
+
+# Worker pool (unlimited scaling)  
+- name: workers
+  roles: [worker]
+  quantity: 2
+  autoscaler:
+    min: 1
+    max: 20
+```
+
+#### Known Limitation
+
+Dynamic scaling of control-plane nodes beyond 5 may experience etcd learner promotion delays. If nodes get stuck in "Provisioning" state waiting for etcd probes, consider:
+
+1. Keeping control-plane pools at 3-5 nodes max
+2. Using worker-only pools for additional capacity
+3. Scaling down to an odd number of control-plane nodes
 
 ### Cloud Credentials
 
