@@ -755,6 +755,15 @@ func (d *Driver) createInstance(ctx context.Context, client *API) error {
 		}
 	}
 
+	// Disable IPv6 on the instance to ensure RKE2 uses IPv4 for cluster communication
+	// This is critical for multi-node clusters where nodes need to reach each other
+	log.Info("Disabling IPv6 on instance to ensure IPv4 cluster communication...")
+	if err := d.disableIPv6(); err != nil {
+		log.Warnf("Failed to disable IPv6: %v (continuing anyway)", err)
+	} else {
+		log.Info("IPv6 disabled successfully")
+	}
+
 	return nil
 }
 
@@ -773,6 +782,33 @@ func (d *Driver) cleanupInstance(ctx context.Context, client *API) {
 		_ = client.DeleteInstance(ctx, d.ProjectID, d.InstanceID)
 	}
 	d.cleanupSSHKey(ctx, client)
+}
+
+// disableIPv6 disables IPv6 on the instance via SSH.
+// This ensures RKE2 uses IPv4 addresses for cluster communication,
+// which is critical for multi-node clusters on OVH where IPv6 may not be routable.
+func (d *Driver) disableIPv6() error {
+	// Wait a moment for SSH to be ready
+	time.Sleep(5 * time.Second)
+
+	// Commands to disable IPv6
+	commands := []string{
+		// Disable IPv6 via sysctl
+		"sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1",
+		"sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1",
+		// Make it persistent
+		"echo 'net.ipv6.conf.all.disable_ipv6=1' | sudo tee -a /etc/sysctl.conf",
+		"echo 'net.ipv6.conf.default.disable_ipv6=1' | sudo tee -a /etc/sysctl.conf",
+	}
+
+	// Run each command via SSH
+	for _, cmd := range commands {
+		if _, err := drivers.RunSSHCommandFromDriver(d, cmd); err != nil {
+			return fmt.Errorf("failed to run '%s': %w", cmd, err)
+		}
+	}
+
+	return nil
 }
 
 // GetState returns the current state of the instance or MKS cluster.
