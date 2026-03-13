@@ -1,0 +1,10 @@
+# CODEOWNERS for docker-machine-driver-ovh
+# These owners will be requested for review on PRs
+
+# Default owners for everything
+* @TheFlemingo
+
+# Security-sensitive paths require explicit review
+SECURITY.md @TheFlemingo
+.github/workflows/ @TheFlemingo
+scripts/ @TheFlemingo
