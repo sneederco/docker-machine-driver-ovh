@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          
+      - name: Prepare GOPATH layout for vendored legacy build
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco"
+          ln -s "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.gopath/src/github.com/sneederco/docker-machine-driver-ovh"
+          
+      - name: Build all architectures
+        env:
+          GOPATH: ${{ github.workspace }}/.gopath
+        run: |
+          cd "$GOPATH/src/github.com/sneederco/docker-machine-driver-ovh"
+          
+          # Build for amd64
+          ./scripts/build.sh amd64 dist
+          
+          # Build for arm64
+          ./scripts/build.sh arm64 dist
+          
+          # Create combined checksum file
+          cat dist/*.sha256 > dist/checksums.txt
+          
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          
+          # Get commits since last tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(git log --oneline $PREV_TAG..HEAD | head -20)
+          else
+            COMMITS=$(git log --oneline -20)
+          fi
+          
+          cat > dist/RELEASE_NOTES.md << EOF
+          ## Installation
+          
+          ### Rancher Node Driver
+          1. Go to **Cluster Management** → **Drivers** → **Node Drivers**
+          2. Click **Add Node Driver** (or edit existing)
+          3. Set URL: \`https://github.com/sneederco/docker-machine-driver-ovh/releases/download/$TAG/docker-machine-driver-ovh-linux-amd64\`
+          4. Set Checksum: (see checksums.txt below)
+          
+          ### Direct Download
+          \`\`\`bash
+          # Linux amd64
+          curl -LO https://github.com/sneederco/docker-machine-driver-ovh/releases/download/$TAG/docker-machine-driver-ovh-linux-amd64
+          
+          # Linux arm64
+          curl -LO https://github.com/sneederco/docker-machine-driver-ovh/releases/download/$TAG/docker-machine-driver-ovh-linux-arm64
+          \`\`\`
+          
+          ## Checksums
+          See \`checksums.txt\` attached to this release.
+          
+          ## Changes
+          \`\`\`
+          $COMMITS
+          \`\`\`
+          EOF
+          
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: dist/RELEASE_NOTES.md
+          files: |
+            dist/docker-machine-driver-ovh-linux-amd64
+            dist/docker-machine-driver-ovh-linux-amd64.sha256
+            dist/docker-machine-driver-ovh-linux-arm64
+            dist/docker-machine-driver-ovh-linux-arm64.sha256
+            dist/checksums.txt
+          fail_on_unmatched_files: true
