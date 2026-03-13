@@ -764,6 +764,15 @@ func (d *Driver) createInstance(ctx context.Context, client *API) error {
 		log.Info("IPv6 disabled successfully")
 	}
 
+	// Wait for cloud-init to complete before handing off to Rancher
+	// This ensures the system is fully ready for bootstrap
+	log.Info("Waiting for cloud-init to complete...")
+	if err := d.waitForCloudInit(); err != nil {
+		log.Warnf("Cloud-init wait issue: %v (continuing anyway)", err)
+	} else {
+		log.Info("Cloud-init completed successfully")
+	}
+
 	return nil
 }
 
@@ -815,6 +824,49 @@ func (d *Driver) disableIPv6() error {
 	}
 
 	return nil
+}
+
+// waitForCloudInit waits for cloud-init to complete on the instance.
+// This ensures the system is fully initialized before Rancher bootstrap begins.
+func (d *Driver) waitForCloudInit() error {
+	maxAttempts := 30
+	sleepDuration := 10 * time.Second
+
+	for i := 0; i < maxAttempts; i++ {
+		output, err := drivers.RunSSHCommandFromDriver(d, "cloud-init status --wait 2>/dev/null || cloud-init status 2>/dev/null || echo 'done'")
+		if err != nil {
+			log.Debugf("Cloud-init check attempt %d failed: %v", i+1, err)
+			time.Sleep(sleepDuration)
+			continue
+		}
+
+		outputStr := strings.TrimSpace(string(output))
+		log.Debugf("Cloud-init status: %s", outputStr)
+
+		// Check for completion states
+		if strings.Contains(outputStr, "done") || strings.Contains(outputStr, "disabled") {
+			return nil
+		}
+
+		// Check for error state
+		if strings.Contains(outputStr, "error") || strings.Contains(outputStr, "recoverable") {
+			log.Warnf("Cloud-init reported error state: %s", outputStr)
+			// Still return nil - let Rancher handle the rest
+			return nil
+		}
+
+		// Still running
+		if strings.Contains(outputStr, "running") {
+			log.Debugf("Cloud-init still running, waiting... (attempt %d/%d)", i+1, maxAttempts)
+			time.Sleep(sleepDuration)
+			continue
+		}
+
+		// Unknown state - assume done
+		return nil
+	}
+
+	return fmt.Errorf("timeout waiting for cloud-init after %d attempts", maxAttempts)
 }
 
 // GetState returns the current state of the instance or MKS cluster.
