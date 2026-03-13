@@ -195,6 +195,39 @@ export PATH=$(go env GOPATH)/src/github.com/sneederco/docker-machine-driver-ovh:
 - `docs/ISSUES-2-4-5-TRACE.md` — traceability for Epic #2 and WS2/WS3 (#4/#5), including command consistency checks and blocker ownership.
 - `docs/ISSUE-4-HOSTED-MKS-SOP.md` — hosted MKS create/delete/scale runbook with hourly billing teardown and rollback checklist.
 
+## Rancher Node Driver
+
+This driver can be registered with Rancher as a node driver for provisioning OVH Cloud instances.
+
+### Installation
+
+1. In Rancher, go to **Cluster Management** → **Drivers** → **Node Drivers**
+2. Click **Add Node Driver**
+3. Enter:
+   - **Download URL**: `https://github.com/sneederco/docker-machine-driver-ovh/releases/download/v1.0.13/docker-machine-driver-ovh-linux-amd64`
+   - **Checksum**: `ce301801d90c6304fbddea0e3cdac02c16148d8b8aebeb5fb8056ccbda943021`
+   - **UI Driver URL**: `https://github.com/sneederco/ui-driver-ovh/releases/download/v0.1.0/component.js`
+
+### Multi-Node Clusters (IPv6 Fix)
+
+**v1.0.13+** includes a critical fix for multi-node clusters on OVH Cloud.
+
+OVH instances have both IPv4 and IPv6 addresses. Without the fix, RKE2 would use IPv6 for cluster join URLs, but IPv6 isn't routable between OVH instances. This caused autoscaled nodes to fail with:
+
+```
+waiting for probes: etcd, kube-apiserver, kube-controller-manager, kube-scheduler, kubelet
+```
+
+The driver now automatically removes IPv6 addresses from instances, ensuring RKE2 uses IPv4 for all cluster communication.
+
+### Cloud Credentials
+
+When creating OVH cloud credentials in Rancher, you'll need:
+- **Application Key**: From OVH API console
+- **Application Secret**: From OVH API console  
+- **Consumer Key**: From OVH API console
+- **Project ID**: Your OVH Cloud project ID
+
 ## License
 
 MIT
